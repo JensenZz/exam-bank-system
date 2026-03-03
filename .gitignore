@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# build output
+out/
+dist/
+release/
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# local IDE/system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# local Claude/runtime files
+.claude/
+
+# local test assets
+2505系统架构设计师真题回忆.pdf
+test_page1.png
+tessdata/
+*.traineddata
+*.traineddata.gz
+
+# local databases
+*.db
+*.sqlite
+*.sqlite3
