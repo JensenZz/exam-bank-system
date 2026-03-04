@@ -10,6 +10,19 @@ import axios from 'axios'
 let db: Database | null = null
 let mainWindow: BrowserWindow | null = null
 
+function columnExists(tableName: string, columnName: string): boolean {
+  if (!db) return false
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
+  return columns.some((column) => column.name === columnName)
+}
+
+function ensureColumn(tableName: string, columnName: string, definition: string): void {
+  if (!db) return
+  if (!columnExists(tableName, columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`)
+  }
+}
+
 function createWindow(): void {
   // Create the browser window.
   mainWindow = new BrowserWindow({
@@ -101,6 +114,20 @@ function initDatabase(): void {
     )
   `)
 
+  // 创建练习会话表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS practice_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      exam_year INTEGER,
+      exam_level TEXT,
+      qualification_name TEXT,
+      total_count INTEGER NOT NULL,
+      correct_count INTEGER NOT NULL,
+      accuracy REAL NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `)
+
   // 创建做题记录表
   db.exec(`
     CREATE TABLE IF NOT EXISTS practice_records (
@@ -111,6 +138,14 @@ function initDatabase(): void {
       practiced_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `)
+
+  // 增量迁移（幂等）
+  ensureColumn('questions', 'exam_year', 'exam_year INTEGER')
+  ensureColumn('questions', 'exam_level', 'exam_level TEXT')
+  ensureColumn('questions', 'qualification_name', 'qualification_name TEXT')
+
+  ensureColumn('practice_records', 'session_id', 'session_id INTEGER')
+  ensureColumn('practice_records', 'question_order', 'question_order INTEGER')
 
   console.log('数据库初始化完成:', dbPath)
 }
@@ -132,6 +167,19 @@ ipcMain.handle('db:getQuestions', (_, filters) => {
   if (filters?.keyword) {
     sql += ' AND (title LIKE ? OR content LIKE ?)'
     params.push(`%${filters.keyword}%`, `%${filters.keyword}%`)
+  }
+  if (Number.isFinite(Number(filters?.examYear))) {
+    sql += ' AND exam_year = ?'
+    params.push(Number(filters.examYear))
+  }
+  if (filters?.examLevel) {
+    sql += ' AND exam_level = ?'
+    params.push(String(filters.examLevel))
+  }
+  const qualificationKeyword = String(filters?.qualificationKeyword || '').trim()
+  if (qualificationKeyword) {
+    sql += ' AND qualification_name LIKE ?'
+    params.push(`%${qualificationKeyword}%`)
   }
 
   sql += ' ORDER BY created_at DESC'
@@ -156,12 +204,18 @@ ipcMain.handle('db:addQuestion', (_, question) => {
     images: Array.isArray(question?.images) ? question.images.map((item: unknown) => String(item)) : [],
     categoryId: Number.isFinite(Number(question?.categoryId)) ? Number(question?.categoryId) : undefined,
     difficulty: Number.isFinite(Number(question?.difficulty)) ? Number(question?.difficulty) : 1,
-    source: String(question?.source || '')
+    source: String(question?.source || ''),
+    examYear: Number.isFinite(Number(question?.examYear)) ? Number(question?.examYear) : null,
+    examLevel: question?.examLevel ? String(question.examLevel) : null,
+    qualificationName: question?.qualificationName ? String(question.qualificationName) : null
   }
 
   const stmt = db.prepare(`
-    INSERT INTO questions (title, content, type, options, answer, analysis, images, category_id, difficulty, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO questions (
+      title, content, type, options, answer, analysis, images,
+      category_id, difficulty, source, exam_year, exam_level, qualification_name
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
   const result = stmt.run(
     safeQuestion.title,
@@ -173,7 +227,10 @@ ipcMain.handle('db:addQuestion', (_, question) => {
     JSON.stringify(safeQuestion.images),
     safeQuestion.categoryId,
     safeQuestion.difficulty,
-    safeQuestion.source
+    safeQuestion.source,
+    safeQuestion.examYear,
+    safeQuestion.examLevel,
+    safeQuestion.qualificationName
   )
 
   return {
@@ -184,26 +241,49 @@ ipcMain.handle('db:addQuestion', (_, question) => {
 
 ipcMain.handle('db:updateQuestion', (_, question) => {
   if (!db) return null
+
+  const safeQuestion = {
+    id: Number(question?.id),
+    title: String(question?.title || ''),
+    content: String(question?.content || ''),
+    type: String(question?.type || 'single'),
+    options: Array.isArray(question?.options) ? question.options.map((item: unknown) => String(item)) : [],
+    answer: String(question?.answer || ''),
+    analysis: String(question?.analysis || ''),
+    images: Array.isArray(question?.images) ? question.images.map((item: unknown) => String(item)) : [],
+    categoryId: Number.isFinite(Number(question?.categoryId)) ? Number(question?.categoryId) : undefined,
+    difficulty: Number.isFinite(Number(question?.difficulty)) ? Number(question?.difficulty) : 1,
+    source: String(question?.source || ''),
+    examYear: Number.isFinite(Number(question?.examYear)) ? Number(question?.examYear) : null,
+    examLevel: question?.examLevel ? String(question.examLevel) : null,
+    qualificationName: question?.qualificationName ? String(question.qualificationName) : null
+  }
+
   const stmt = db.prepare(`
     UPDATE questions SET
       title = ?, content = ?, type = ?, options = ?, answer = ?,
-      analysis = ?, images = ?, category_id = ?, difficulty = ?, source = ?, updated_at = CURRENT_TIMESTAMP
+      analysis = ?, images = ?, category_id = ?, difficulty = ?, source = ?,
+      exam_year = ?, exam_level = ?, qualification_name = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `)
   stmt.run(
-    question.title,
-    question.content,
-    question.type,
-    JSON.stringify(question.options),
-    question.answer,
-    question.analysis,
-    JSON.stringify(question.images || []),
-    question.categoryId,
-    question.difficulty,
-    question.source,
-    question.id
+    safeQuestion.title,
+    safeQuestion.content,
+    safeQuestion.type,
+    JSON.stringify(safeQuestion.options),
+    safeQuestion.answer,
+    safeQuestion.analysis,
+    JSON.stringify(safeQuestion.images),
+    safeQuestion.categoryId,
+    safeQuestion.difficulty,
+    safeQuestion.source,
+    safeQuestion.examYear,
+    safeQuestion.examLevel,
+    safeQuestion.qualificationName,
+    safeQuestion.id
   )
-  return question
+
+  return safeQuestion
 })
 
 ipcMain.handle('db:deleteQuestion', (_, id) => {
@@ -223,12 +303,235 @@ ipcMain.handle('db:addCategory', (_, name, parentId = 0) => {
   return { id: Number(result.lastInsertRowid), name, parent_id: parentId }
 })
 
+ipcMain.handle('db:createPracticeSession', (_, session) => {
+  if (!db) return null
+
+  const safeSession = {
+    examYear: Number.isFinite(Number(session?.examYear)) ? Number(session?.examYear) : null,
+    examLevel: session?.examLevel ? String(session.examLevel) : null,
+    qualificationName: session?.qualificationName ? String(session.qualificationName) : null,
+    totalCount: Number.isFinite(Number(session?.totalCount)) ? Number(session.totalCount) : 0,
+    correctCount: Number.isFinite(Number(session?.correctCount)) ? Number(session.correctCount) : 0,
+    accuracy: Number.isFinite(Number(session?.accuracy)) ? Number(session.accuracy) : 0
+  }
+
+  const stmt = db.prepare(`
+    INSERT INTO practice_sessions (
+      exam_year, exam_level, qualification_name,
+      total_count, correct_count, accuracy
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+  `)
+
+  const result = stmt.run(
+    safeSession.examYear,
+    safeSession.examLevel,
+    safeSession.qualificationName,
+    safeSession.totalCount,
+    safeSession.correctCount,
+    safeSession.accuracy
+  )
+
+  return {
+    id: Number(result.lastInsertRowid),
+    ...safeSession
+  }
+})
+
+ipcMain.handle('db:addPracticeRecords', (_, records) => {
+  if (!db) return { inserted: 0 }
+  if (!Array.isArray(records) || records.length === 0) return { inserted: 0 }
+
+  type PracticeRecordPayload = {
+    questionId?: unknown
+    userAnswer?: unknown
+    isCorrect?: unknown
+    sessionId?: unknown
+    questionOrder?: unknown
+  }
+
+  const normalized = (records as PracticeRecordPayload[]).map((item) => {
+    const questionId = Number(item.questionId)
+    const sessionId = Number(item.sessionId)
+    if (!Number.isFinite(questionId) || !Number.isFinite(sessionId)) {
+      throw new Error('练习记录参数不合法')
+    }
+
+    return {
+      questionId,
+      userAnswer: String(item.userAnswer || ''),
+      isCorrect: item.isCorrect ? 1 : 0,
+      sessionId,
+      questionOrder: Number.isFinite(Number(item.questionOrder)) ? Number(item.questionOrder) : null
+    }
+  })
+
+  const stmt = db.prepare(`
+    INSERT INTO practice_records (
+      question_id, user_answer, is_correct, session_id, question_order
+    )
+    VALUES (?, ?, ?, ?, ?)
+  `)
+
+  const transaction = db.transaction((items: Array<{ questionId: number; userAnswer: string; isCorrect: number; sessionId: number; questionOrder: number | null }>) => {
+    for (const item of items) {
+      stmt.run(item.questionId, item.userAnswer, item.isCorrect, item.sessionId, item.questionOrder)
+    }
+  })
+
+  transaction(normalized)
+
+  return { inserted: normalized.length }
+})
+
+ipcMain.handle('db:savePracticeResult', (_, payload) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  type PracticeRecordDraftPayload = {
+    questionId?: unknown
+    userAnswer?: unknown
+    isCorrect?: unknown
+    questionOrder?: unknown
+  }
+
+  const records = Array.isArray(payload?.records) ? (payload.records as PracticeRecordDraftPayload[]) : []
+  if (records.length === 0) {
+    throw new Error('练习记录不能为空')
+  }
+
+  const safeSession = {
+    examYear: Number.isFinite(Number(payload?.session?.examYear)) ? Number(payload.session.examYear) : null,
+    examLevel: payload?.session?.examLevel ? String(payload.session.examLevel) : null,
+    qualificationName: payload?.session?.qualificationName ? String(payload.session.qualificationName) : null,
+    totalCount: Number.isFinite(Number(payload?.session?.totalCount)) ? Number(payload.session.totalCount) : records.length,
+    correctCount: Number.isFinite(Number(payload?.session?.correctCount)) ? Number(payload.session.correctCount) : 0,
+    accuracy: Number.isFinite(Number(payload?.session?.accuracy)) ? Number(payload.session.accuracy) : 0
+  }
+
+  const normalizedRecords = records.map((item, index) => {
+    const questionId = Number(item.questionId)
+    if (!Number.isFinite(questionId)) {
+      throw new Error('练习记录参数不合法')
+    }
+
+    return {
+      questionId,
+      userAnswer: String(item.userAnswer || ''),
+      isCorrect: item.isCorrect ? 1 : 0,
+      questionOrder: Number.isFinite(Number(item.questionOrder)) ? Number(item.questionOrder) : index + 1
+    }
+  })
+
+  const insertSessionStmt = db.prepare(`
+    INSERT INTO practice_sessions (
+      exam_year, exam_level, qualification_name,
+      total_count, correct_count, accuracy
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+  `)
+
+  const insertRecordStmt = db.prepare(`
+    INSERT INTO practice_records (
+      question_id, user_answer, is_correct, session_id, question_order
+    )
+    VALUES (?, ?, ?, ?, ?)
+  `)
+
+  const transaction = db.transaction(() => {
+    const sessionResult = insertSessionStmt.run(
+      safeSession.examYear,
+      safeSession.examLevel,
+      safeSession.qualificationName,
+      safeSession.totalCount,
+      safeSession.correctCount,
+      safeSession.accuracy
+    )
+
+    const sessionId = Number(sessionResult.lastInsertRowid)
+
+    for (const record of normalizedRecords) {
+      insertRecordStmt.run(
+        record.questionId,
+        record.userAnswer,
+        record.isCorrect,
+        sessionId,
+        record.questionOrder
+      )
+    }
+
+    return {
+      session: {
+        id: sessionId,
+        ...safeSession
+      },
+      inserted: normalizedRecords.length
+    }
+  })
+
+  return transaction()
+})
+
+ipcMain.handle('db:getPracticeSessions', (_, filters) => {
+  if (!db) return []
+
+  let sql = 'SELECT * FROM practice_sessions WHERE 1=1'
+  const params: any[] = []
+
+  if (Number.isFinite(Number(filters?.examYear))) {
+    sql += ' AND exam_year = ?'
+    params.push(Number(filters.examYear))
+  }
+  if (filters?.examLevel) {
+    sql += ' AND exam_level = ?'
+    params.push(String(filters.examLevel))
+  }
+  const qualificationKeyword = String(filters?.qualificationKeyword || '').trim()
+  if (qualificationKeyword) {
+    sql += ' AND qualification_name LIKE ?'
+    params.push(`%${qualificationKeyword}%`)
+  }
+
+  sql += ' ORDER BY created_at DESC'
+
+  return db.prepare(sql).all(...params)
+})
+
+ipcMain.handle('db:getPracticeSessionDetails', (_, sessionId: number) => {
+  if (!db) return []
+  const safeSessionId = Number(sessionId)
+  if (!Number.isFinite(safeSessionId)) return []
+
+  return db.prepare(`
+    SELECT
+      pr.id,
+      pr.session_id,
+      pr.question_id,
+      pr.question_order,
+      pr.user_answer,
+      pr.is_correct,
+      pr.practiced_at,
+      COALESCE(q.title, '[题目已删除]') AS title,
+      q.content,
+      q.type,
+      q.options,
+      q.answer,
+      q.analysis,
+      q.exam_year,
+      q.exam_level,
+      q.qualification_name
+    FROM practice_records pr
+    LEFT JOIN questions q ON q.id = pr.question_id
+    WHERE pr.session_id = ?
+    ORDER BY pr.question_order ASC, pr.id ASC
+  `).all(safeSessionId)
+})
+
 // IPC处理 - 文件操作
 ipcMain.handle('file:selectPdf', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   const result = await dialog.showOpenDialog(win!, {
     filters: [{ name: 'PDF Files', extensions: ['pdf'] }],
-    properties: ['openFile', 'multiSelections']
+    properties: ['openFile']
   })
   if (result.canceled) return []
   return result.filePaths

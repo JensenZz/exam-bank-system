@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import TitleBar from './components/TitleBar.vue'
 import { useQuestionStore } from './stores/questionStore'
 
 const questionStore = useQuestionStore()
-const currentView = ref('library')
+const route = useRoute()
+const currentView = computed(() => route.path.replace(/^\//, '') || 'library')
 
 onMounted(() => {
   // 异步加载分类，不阻塞页面显示
@@ -19,7 +21,7 @@ onMounted(() => {
   <div class="app-container">
     <TitleBar />
     <div class="main-content">
-      <Sidebar :currentView="currentView" @navigate="currentView = $event" />
+      <Sidebar :currentView="currentView" />
       <main class="content-area">
         <router-view />
       </main>

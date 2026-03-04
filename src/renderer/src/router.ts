@@ -25,6 +25,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '做题练习' }
   },
   {
+    path: '/practice-history',
+    name: 'PracticeHistory',
+    component: () => import('./views/PracticeHistory.vue'),
+    meta: { title: '成绩记录' }
+  },
+  {
     path: '/settings',
     name: 'Settings',
     component: () => import('./views/Settings.vue'),

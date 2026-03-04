@@ -3,10 +3,10 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useImportStore } from '../stores/importStore'
 import { useQuestionStore } from '../stores/questionStore'
 import AiConfig from '../components/AiConfig.vue'
-import PdfPreview from '../components/PdfPreview.vue'
 import QuestionList from '../components/QuestionList.vue'
 import ProgressIndicator from '../components/ProgressIndicator.vue'
 import type { AiServiceConfig } from '../types/ai'
+import type { ExamLevel } from '../types'
 
 const importStore = useImportStore()
 const questionStore = useQuestionStore()
@@ -14,6 +14,11 @@ const questionStore = useQuestionStore()
 const showAiConfig = ref(false)
 const aiConfig = ref<AiServiceConfig | null>(null)
 const error = ref<string | null>(null)
+const examYear = ref<number | null>(new Date().getFullYear())
+const examLevel = ref<ExamLevel | ''>('')
+const qualificationName = ref('')
+const examLevels: ExamLevel[] = ['初级', '中级', '高级']
+
 const currentStep = computed<'select' | 'config' | 'processing' | 'preview' | 'complete'>(() => {
   if (importStore.progress.status === 'processing') return 'processing'
   if (importStore.progress.status === 'completed') return 'complete'
@@ -57,14 +62,22 @@ const progress = computed(() => {
   return Math.round((importStore.progress.current / importStore.progress.total) * 100)
 })
 
+const canStartImport = computed(() => {
+  const validYear = Number.isFinite(Number(examYear.value)) && Number(examYear.value) >= 1900 && Number(examYear.value) <= 2100
+  const validLevel = Boolean(examLevel.value)
+  const validQualification = qualificationName.value.trim().length > 0
+  return validYear && validLevel && validQualification
+})
+
 // 处理文件选择
 const handleFileSelect = async () => {
   try {
     const files = await window.electronAPI.file.selectPdf()
     if (files && files.length > 0) {
-      importStore.selectedFiles = files
+      const selectedFile = files[0]
+      importStore.selectedFiles = [selectedFile]
       importStore.progress.status = 'idle'
-      error.value = null
+      error.value = files.length > 1 ? '一次仅支持导入 1 个 PDF，已自动保留第一个文件。' : null
     }
   } catch (err) {
     error.value = '选择文件失败：' + (err as Error).message
@@ -80,8 +93,8 @@ const handleDrop = (e: DragEvent) => {
 
   if (files.length > 0) {
     importStore.progress.status = 'idle'
-    importStore.selectedFiles = files
-    error.value = null
+    importStore.selectedFiles = [files[0]]
+    error.value = files.length > 1 ? '一次仅支持导入 1 个 PDF，已自动保留第一个文件。' : null
   }
 }
 
@@ -95,6 +108,10 @@ const handleConfigReady = async (config: AiServiceConfig) => {
 // 开始导入流程
 const startImport = async () => {
   if (!aiConfig.value || importStore.selectedFiles.length === 0) return
+  if (!canStartImport.value) {
+    error.value = '请先填写完整的年份、级别和资格名称'
+    return
+  }
 
   importStore.progress.status = 'processing'
   error.value = null
@@ -126,7 +143,16 @@ const startImport = async () => {
 // 确认导入到题库
 const handleConfirmImport = async () => {
   try {
-    await importStore.confirmImport()
+    if (!canStartImport.value || !examLevel.value) {
+      error.value = '请先填写完整的年份、级别和资格名称'
+      return
+    }
+
+    await importStore.confirmImport({
+      examYear: Number(examYear.value),
+      examLevel: examLevel.value,
+      qualificationName: qualificationName.value.trim()
+    })
     importStore.progress.status = 'completed'
 
     // 刷新题库数据
@@ -141,6 +167,9 @@ const handleRestart = () => {
   importStore.selectedFiles = []
   aiConfig.value = null
   error.value = null
+  examYear.value = new Date().getFullYear()
+  examLevel.value = ''
+  qualificationName.value = ''
   extractStatusMessage.value = ''
   extractProgress.value = null
   importStore.reset()
@@ -161,7 +190,7 @@ const removeFile = (index: number) => {
 <template>
   <div class="import-page">
     <header class="page-header">
-      <h1>📄 AI 导入题库</h1>
+      <h1>AI 导入题库</h1>
       <p class="subtitle">使用 AI 智能识别 PDF 中的题目并自动导入</p>
     </header>
 
@@ -213,7 +242,7 @@ const removeFile = (index: number) => {
           </svg>
           选择文件
         </button>
-        <p class="upload-hint">支持批量导入多个 PDF 文件</p>
+        <p class="upload-hint">一次仅支持导入 1 个 PDF 文件</p>
       </div>
     </div>
 
@@ -230,6 +259,27 @@ const removeFile = (index: number) => {
         </div>
       </div>
 
+      <div class="metadata-form">
+        <h3>试题元数据（必填）</h3>
+        <div class="metadata-row">
+          <div class="metadata-group">
+            <label>年份</label>
+            <input v-model.number="examYear" type="number" min="1900" max="2100" class="form-input" placeholder="例如：2025" />
+          </div>
+          <div class="metadata-group">
+            <label>级别</label>
+            <select v-model="examLevel" class="form-select">
+              <option value="">请选择级别</option>
+              <option v-for="level in examLevels" :key="level" :value="level">{{ level }}</option>
+            </select>
+          </div>
+        </div>
+        <div class="metadata-group">
+          <label>资格名称</label>
+          <input v-model="qualificationName" type="text" class="form-input" placeholder="请输入资格名称" />
+        </div>
+      </div>
+
       <div v-if="aiConfig" class="config-hint">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="#67c23a"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
         已加载 AI 配置 ({{ aiConfig.provider }} / {{ aiConfig.model }})
@@ -238,7 +288,7 @@ const removeFile = (index: number) => {
 
       <div class="config-actions">
         <button class="btn-secondary" @click="handleRestart">重新选择</button>
-        <button v-if="aiConfig" class="btn-primary" @click="startImport">
+        <button v-if="aiConfig" class="btn-primary" :disabled="!canStartImport" @click="startImport">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
           </svg>
@@ -461,7 +511,7 @@ const removeFile = (index: number) => {
   border-radius: 12px;
   padding: 24px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .file-list h3 {
@@ -518,6 +568,11 @@ const removeFile = (index: number) => {
   opacity: 0.9;
 }
 
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .btn-secondary {
   display: inline-flex;
   align-items: center;
@@ -540,6 +595,47 @@ const removeFile = (index: number) => {
   display: flex;
   justify-content: center;
   gap: 16px;
+}
+
+.metadata-form {
+  background: white;
+  border-radius: 12px;
+  padding: 20px 24px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  margin-bottom: 16px;
+}
+
+.metadata-form h3 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  color: #303133;
+}
+
+.metadata-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.metadata-group {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metadata-group label {
+  font-size: 14px;
+  color: #606266;
+}
+
+.form-input,
+.form-select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  font-size: 14px;
 }
 
 .config-hint {

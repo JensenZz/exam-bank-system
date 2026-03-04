@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useQuestionStore, type Question } from '../stores/questionStore'
+import { ref, computed } from 'vue'
+import { useQuestionStore } from '../stores/questionStore'
+import type { Question, ExamLevel } from '../types'
 
 const store = useQuestionStore()
 
@@ -13,16 +14,11 @@ const practiceQuestions = ref<Question[]>([])
 const answers = ref<Map<number, string>>(new Map())
 
 // 筛选条件
-const selectedType = ref('')
-const selectedCategory = ref<number | null>(null)
-const questionCount = ref(10)
-
-const questionTypes = [
-  { value: 'single', label: '单选题' },
-  { value: 'multiple', label: '多选题' },
-  { value: 'fill', label: '填空题' },
-  { value: 'essay', label: '简答题' }
-]
+const selectedExamYear = ref<number | null>(new Date().getFullYear())
+const selectedExamLevel = ref<ExamLevel | ''>('')
+const qualificationKeyword = ref('')
+const examLevels: ExamLevel[] = ['初级', '中级', '高级']
+const isSavingResult = ref(false)
 
 // 当前题目
 const currentQuestion = computed(() => {
@@ -36,21 +32,61 @@ const progress = computed(() => {
   return Math.round(((currentIndex.value + 1) / practiceQuestions.value.length) * 100)
 })
 
+const canStartPractice = computed(() => {
+  const validYear = Number.isFinite(Number(selectedExamYear.value)) && Number(selectedExamYear.value) >= 1900 && Number(selectedExamYear.value) <= 2100
+  const validLevel = Boolean(selectedExamLevel.value)
+  const validQualification = qualificationKeyword.value.trim().length > 0
+  return validYear && validLevel && validQualification
+})
+
+const resetPracticeState = () => {
+  isPracticing.value = false
+  practiceQuestions.value = []
+  currentIndex.value = 0
+  selectedAnswer.value = ''
+  showAnswer.value = false
+  answers.value = new Map()
+}
+
+const normalizeAnswer = (answer: string, questionType: Question['type']) => {
+  const base = String(answer || '').trim().toUpperCase()
+  if (questionType === 'multiple') {
+    return base
+      .split('')
+      .filter((char) => /[A-Z]/.test(char))
+      .sort()
+      .join('')
+  }
+  return base
+}
+
+const isCorrectAnswer = (question: Question, userAnswer: string) => {
+  const normalizedUser = normalizeAnswer(userAnswer, question.type)
+  const normalizedCorrect = normalizeAnswer(question.answer, question.type)
+  return normalizedUser === normalizedCorrect
+}
+
 // 开始练习
 const startPractice = async () => {
-  await store.loadQuestions({
-    type: selectedType.value || undefined,
-    categoryId: selectedCategory.value || undefined,
-    limit: questionCount.value
-  })
-
-  if (store.questions.length === 0) {
-    alert('没有符合条件的题目，请调整筛选条件')
+  if (!canStartPractice.value || !selectedExamLevel.value) {
+    alert('请先填写完整的年份、级别和资格名称')
     return
   }
 
-  // 随机打乱题目顺序
-  practiceQuestions.value = [...store.questions].sort(() => Math.random() - 0.5)
+  await store.loadQuestions({
+    examYear: Number(selectedExamYear.value),
+    examLevel: selectedExamLevel.value,
+    qualificationKeyword: qualificationKeyword.value.trim()
+  })
+
+  if (store.questions.length === 0) {
+    alert('未匹配到题目，请调整筛选条件')
+    return
+  }
+
+  alert(`匹配到 ${store.questions.length} 道题目，将加载全部题目开始练习`)
+
+  practiceQuestions.value = [...store.questions]
   isPracticing.value = true
   currentIndex.value = 0
   selectedAnswer.value = ''
@@ -58,10 +94,26 @@ const startPractice = async () => {
   answers.value = new Map()
 }
 
+const updateMultipleAnswer = (optionLabel: string, checked: boolean) => {
+  const current = selectedAnswer.value.toUpperCase().split('').filter((char) => /[A-Z]/.test(char))
+  const next = checked
+    ? Array.from(new Set([...current, optionLabel]))
+    : current.filter((char) => char !== optionLabel)
+  selectedAnswer.value = next.sort().join('')
+}
+
+const handleMultipleAnswerChange = (optionLabel: string, event: Event) => {
+  const target = event.target as HTMLInputElement
+  updateMultipleAnswer(optionLabel, target.checked)
+}
+
 // 提交答案
 const submitAnswer = () => {
-  if (!currentQuestion.value) return
-  answers.value.set(currentQuestion.value.id!, selectedAnswer.value)
+  if (!currentQuestion.value?.id) return
+  const answer = currentQuestion.value.type === 'multiple'
+    ? normalizeAnswer(selectedAnswer.value, 'multiple')
+    : selectedAnswer.value
+  answers.value.set(currentQuestion.value.id, answer)
   showAnswer.value = true
 }
 
@@ -69,7 +121,8 @@ const submitAnswer = () => {
 const nextQuestion = () => {
   if (currentIndex.value < practiceQuestions.value.length - 1) {
     currentIndex.value++
-    selectedAnswer.value = answers.value.get(practiceQuestions.value[currentIndex.value].id!) || ''
+    const nextId = practiceQuestions.value[currentIndex.value].id
+    selectedAnswer.value = nextId ? (answers.value.get(nextId) || '') : ''
     showAnswer.value = false
   }
 }
@@ -78,20 +131,61 @@ const nextQuestion = () => {
 const prevQuestion = () => {
   if (currentIndex.value > 0) {
     currentIndex.value--
-    selectedAnswer.value = answers.value.get(practiceQuestions.value[currentIndex.value].id!) || ''
+    const prevId = practiceQuestions.value[currentIndex.value].id
+    selectedAnswer.value = prevId ? (answers.value.get(prevId) || '') : ''
     showAnswer.value = false
   }
 }
 
 // 结束练习
 const endPractice = () => {
-  if (confirm('确定要结束练习吗？')) {
-    isPracticing.value = false
-    practiceQuestions.value = []
-    currentIndex.value = 0
-    selectedAnswer.value = ''
-    showAnswer.value = false
-    answers.value = new Map()
+  if (confirm('确定要结束练习吗？未提交的成绩不会保存。')) {
+    resetPracticeState()
+  }
+}
+
+const finalizePractice = async () => {
+  if (!selectedExamLevel.value || !selectedExamYear.value) {
+    alert('缺少练习元数据，无法保存成绩')
+    return
+  }
+
+  isSavingResult.value = true
+
+  try {
+    const totalCount = practiceQuestions.value.length
+    const draftRecords = practiceQuestions.value.map((question, index) => {
+      const userAnswer = question.id ? (answers.value.get(question.id) || '') : ''
+      return {
+        questionId: Number(question.id),
+        userAnswer,
+        isCorrect: isCorrectAnswer(question, userAnswer),
+        questionOrder: index + 1
+      }
+    })
+
+    const correctCount = draftRecords.filter((record) => record.isCorrect).length
+    const accuracy = totalCount === 0 ? 0 : Number(((correctCount / totalCount) * 100).toFixed(2))
+
+    await store.savePracticeResult({
+      session: {
+        examYear: Number(selectedExamYear.value),
+        examLevel: selectedExamLevel.value,
+        qualificationName: qualificationKeyword.value.trim(),
+        totalCount,
+        correctCount,
+        accuracy
+      },
+      records: draftRecords
+    })
+
+    alert(`练习完成！共 ${totalCount} 题，答对 ${correctCount} 题，正确率 ${accuracy}%`)
+    resetPracticeState()
+  } catch (error) {
+    console.error('保存练习成绩失败:', error)
+    alert('保存练习成绩失败，请重试')
+  } finally {
+    isSavingResult.value = false
   }
 }
 
@@ -102,14 +196,11 @@ const getOptionLabel = (index: number) => {
 
 // 检查答案是否正确
 const isCorrect = (question: Question) => {
-  const userAnswer = answers.value.get(question.id!)
+  if (!question.id) return false
+  const userAnswer = answers.value.get(question.id)
   if (!userAnswer) return false
-  return userAnswer.toLowerCase().trim() === question.answer.toLowerCase().trim()
+  return isCorrectAnswer(question, userAnswer)
 }
-
-onMounted(() => {
-  store.loadCategories()
-})
 </script>
 
 <template>
@@ -123,31 +214,26 @@ onMounted(() => {
 
       <div class="setup-form">
         <div class="form-group">
-          <label>题目类型</label>
-          <select v-model="selectedType" class="form-select">
-            <option value="">全部类型</option>
-            <option v-for="t in questionTypes" :key="t.value" :value="t.value">
-              {{ t.label }}
+          <label>年份</label>
+          <input v-model.number="selectedExamYear" type="number" min="1900" max="2100" class="form-input" placeholder="例如：2025" />
+        </div>
+
+        <div class="form-group">
+          <label>级别</label>
+          <select v-model="selectedExamLevel" class="form-select">
+            <option value="">请选择级别</option>
+            <option v-for="level in examLevels" :key="level" :value="level">
+              {{ level }}
             </option>
           </select>
         </div>
 
         <div class="form-group">
-          <label>题目分类</label>
-          <select v-model="selectedCategory" class="form-select">
-            <option :value="null">全部分类</option>
-            <option v-for="c in store.categories" :key="c.id" :value="c.id">
-              {{ c.name }}
-            </option>
-          </select>
+          <label>资格名称（支持模糊匹配）</label>
+          <input v-model="qualificationKeyword" type="text" class="form-input" placeholder="例如：信息系统项目管理师" />
         </div>
 
-        <div class="form-group">
-          <label>题目数量</label>
-          <input v-model.number="questionCount" type="number" min="1" max="50" class="form-input" />
-        </div>
-
-        <button class="btn-start" @click="startPractice">
+        <button class="btn-start" :disabled="!canStartPractice" @click="startPractice">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
             <path d="M8 5v14l11-7z"/>
           </svg>
@@ -164,14 +250,14 @@ onMounted(() => {
           <div class="progress-fill" :style="{ width: progress + '%' }"></div>
           <span class="progress-text">{{ currentIndex + 1 }} / {{ practiceQuestions.length }}</span>
         </div>
-        <button class="btn-end" @click="endPractice">结束练习</button>
+        <button class="btn-end" :disabled="isSavingResult" @click="endPractice">结束练习</button>
       </div>
 
       <!-- 题目区域 -->
       <div class="question-area">
         <div class="question-header">
           <span class="question-type" :class="currentQuestion.type">
-            {{ questionTypes.find(t => t.value === currentQuestion?.type)?.label }}
+            {{ currentQuestion.type === 'single' ? '单选题' : currentQuestion.type === 'multiple' ? '多选题' : currentQuestion.type === 'fill' ? '填空题' : '简答题' }}
           </span>
           <span class="question-difficulty" :class="'level-' + currentQuestion.difficulty">
             {{ ['', '简单', '中等', '困难'][currentQuestion.difficulty] }}
@@ -197,7 +283,7 @@ onMounted(() => {
               type="radio"
               :value="getOptionLabel(index)"
               v-model="selectedAnswer"
-              :disabled="showAnswer"
+              :disabled="showAnswer || isSavingResult"
             />
             <span class="option-label">{{ getOptionLabel(index) }}.</span>
             <span class="option-text">{{ option }}</span>
@@ -218,9 +304,9 @@ onMounted(() => {
           >
             <input
               type="checkbox"
-              :value="getOptionLabel(index)"
-              v-model="selectedAnswer"
-              :disabled="showAnswer"
+              :checked="selectedAnswer.includes(getOptionLabel(index))"
+              :disabled="showAnswer || isSavingResult"
+              @change="handleMultipleAnswerChange(getOptionLabel(index), $event)"
             />
             <span class="option-label">{{ getOptionLabel(index) }}.</span>
             <span class="option-text">{{ option }}</span>
@@ -234,7 +320,7 @@ onMounted(() => {
             class="form-textarea"
             rows="4"
             placeholder="请输入答案"
-            :disabled="showAnswer"
+            :disabled="showAnswer || isSavingResult"
           ></textarea>
         </div>
 
@@ -273,15 +359,15 @@ onMounted(() => {
         <button
           v-else
           class="btn-submit"
-          :disabled="currentIndex === practiceQuestions.length - 1"
-          @click="nextQuestion"
+          :disabled="isSavingResult"
+          @click="currentIndex === practiceQuestions.length - 1 ? finalizePractice() : nextQuestion()"
         >
-          {{ currentIndex === practiceQuestions.length - 1 ? '已完成' : '下一题' }}
+          {{ currentIndex === practiceQuestions.length - 1 ? (isSavingResult ? '保存中...' : '完成并保存成绩') : '下一题' }}
         </button>
 
         <button
           class="btn-nav"
-          :disabled="currentIndex === practiceQuestions.length - 1"
+          :disabled="currentIndex === practiceQuestions.length - 1 || isSavingResult"
           @click="nextQuestion"
         >
           下一题
@@ -369,6 +455,11 @@ onMounted(() => {
 
 .btn-start:hover {
   opacity: 0.9;
+}
+
+.btn-start:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* 练习界面 */

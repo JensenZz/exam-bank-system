@@ -182,7 +182,7 @@ export const useImportStore = defineStore('import', () => {
   /**
    * 确认导入到数据库
    */
-  async function confirmImport() {
+  async function confirmImport(metadata?: { examYear: number; examLevel: '初级' | '中级' | '高级'; qualificationName: string }) {
     const questionStore = useQuestionStore()
 
     for (const question of questions.value) {
@@ -204,7 +204,10 @@ export const useImportStore = defineStore('import', () => {
         analysis: String(question.analysis || ''),
         categoryId,
         difficulty: Number(question.difficulty || 1),
-        source: String(question.source || '')
+        source: String(question.source || ''),
+        examYear: Number(metadata?.examYear ?? question.examYear),
+        examLevel: (metadata?.examLevel ?? question.examLevel) as '初级' | '中级' | '高级' | undefined,
+        qualificationName: String(metadata?.qualificationName ?? question.qualificationName ?? '')
       })
     }
   }

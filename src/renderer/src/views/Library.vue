@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { useQuestionStore, type Question } from '../stores/questionStore'
+import { useQuestionStore } from '../stores/questionStore'
+import type { Question, ExamLevel } from '../types'
 import QuestionForm from '../components/QuestionForm.vue'
 
 const store = useQuestionStore()
@@ -8,6 +9,10 @@ const store = useQuestionStore()
 const searchKeyword = ref('')
 const selectedType = ref('')
 const selectedCategory = ref<number | null>(null)
+const selectedExamYear = ref<number | null>(null)
+const selectedExamLevel = ref<ExamLevel | ''>('')
+const qualificationKeyword = ref('')
+const examLevels: ExamLevel[] = ['初级', '中级', '高级']
 const showAddModal = ref(false)
 const editingQuestion = ref<Question | null>(null)
 
@@ -33,6 +38,16 @@ const filteredQuestions = computed(() => {
   if (selectedCategory.value) {
     result = result.filter(q => q.categoryId === selectedCategory.value)
   }
+  if (selectedExamYear.value) {
+    result = result.filter(q => Number(q.examYear) === Number(selectedExamYear.value))
+  }
+  if (selectedExamLevel.value) {
+    result = result.filter(q => q.examLevel === selectedExamLevel.value)
+  }
+  if (qualificationKeyword.value.trim()) {
+    const keyword = qualificationKeyword.value.trim().toLowerCase()
+    result = result.filter(q => q.qualificationName?.toLowerCase().includes(keyword))
+  }
   return result
 })
 
@@ -44,7 +59,10 @@ const handleSearch = () => {
   store.loadQuestions({
     keyword: searchKeyword.value,
     type: selectedType.value || undefined,
-    categoryId: selectedCategory.value || undefined
+    categoryId: selectedCategory.value || undefined,
+    examYear: selectedExamYear.value || undefined,
+    examLevel: selectedExamLevel.value || undefined,
+    qualificationKeyword: qualificationKeyword.value.trim() || undefined
   })
 }
 
@@ -108,6 +126,31 @@ const getDifficultyLabel = (level: number) => {
         </option>
       </select>
 
+      <input
+        v-model.number="selectedExamYear"
+        type="number"
+        min="1900"
+        max="2100"
+        class="filter-input"
+        placeholder="年份"
+        @keyup.enter="handleSearch"
+      />
+
+      <select v-model="selectedExamLevel" class="filter-select" @change="handleSearch">
+        <option value="">全部级别</option>
+        <option v-for="level in examLevels" :key="level" :value="level">
+          {{ level }}
+        </option>
+      </select>
+
+      <input
+        v-model="qualificationKeyword"
+        type="text"
+        class="filter-input"
+        placeholder="资格名称关键词"
+        @keyup.enter="handleSearch"
+      />
+
       <button class="btn-secondary" @click="handleSearch">搜索</button>
     </div>
 
@@ -140,6 +183,11 @@ const getDifficultyLabel = (level: number) => {
           </div>
           <h3 class="question-title">{{ question.title }}</h3>
           <p v-if="question.content" class="question-content">{{ question.content }}</p>
+          <div class="question-meta" v-if="question.examYear || question.examLevel || question.qualificationName">
+            <span v-if="question.examYear" class="meta-tag">年份: {{ question.examYear }}</span>
+            <span v-if="question.examLevel" class="meta-tag">级别: {{ question.examLevel }}</span>
+            <span v-if="question.qualificationName" class="meta-tag">资格: {{ question.qualificationName }}</span>
+          </div>
           <div class="question-footer">
             <span class="question-source" v-if="question.source">来源: {{ question.source }}</span>
             <div class="question-actions">
@@ -226,12 +274,16 @@ const getDifficultyLabel = (level: number) => {
   font-size: 14px;
 }
 
-.filter-select {
+.filter-select,
+.filter-input {
   padding: 10px 16px;
   border: 1px solid #dcdfe6;
   border-radius: 6px;
   background: white;
   font-size: 14px;
+}
+
+.filter-select {
   cursor: pointer;
 }
 
@@ -302,6 +354,21 @@ const getDifficultyLabel = (level: number) => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.question-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.meta-tag {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #606266;
+  background: #f5f7fa;
 }
 
 .question-footer {

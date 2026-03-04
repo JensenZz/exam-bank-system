@@ -9,7 +9,12 @@ const electronAPI = {
     updateQuestion: (question: any) => ipcRenderer.invoke('db:updateQuestion', question),
     deleteQuestion: (id: number) => ipcRenderer.invoke('db:deleteQuestion', id),
     getCategories: () => ipcRenderer.invoke('db:getCategories'),
-    addCategory: (name: string, parentId?: number) => ipcRenderer.invoke('db:addCategory', name, parentId)
+    addCategory: (name: string, parentId?: number) => ipcRenderer.invoke('db:addCategory', name, parentId),
+    createPracticeSession: (session: any) => ipcRenderer.invoke('db:createPracticeSession', session),
+    addPracticeRecords: (records: any[]) => ipcRenderer.invoke('db:addPracticeRecords', records),
+    getPracticeSessions: (filters?: any) => ipcRenderer.invoke('db:getPracticeSessions', filters),
+    getPracticeSessionDetails: (sessionId: number) => ipcRenderer.invoke('db:getPracticeSessionDetails', sessionId),
+    savePracticeResult: (payload: any) => ipcRenderer.invoke('db:savePracticeResult', payload)
   },
 
   // 文件操作

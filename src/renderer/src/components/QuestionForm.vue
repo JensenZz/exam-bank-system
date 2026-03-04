@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { useQuestionStore, type Question } from '../stores/questionStore'
+import { useQuestionStore } from '../stores/questionStore'
+import type { Question } from '../types'
 
 const props = defineProps<{
   question?: Question | null
