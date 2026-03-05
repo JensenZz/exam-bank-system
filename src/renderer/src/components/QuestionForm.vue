@@ -2,6 +2,8 @@
 import { ref, watch } from 'vue'
 import { useQuestionStore } from '../stores/questionStore'
 import type { Question } from '../types'
+import BaseDialog from './BaseDialog.vue'
+import { useDialog } from '../composables/useDialog'
 
 const props = defineProps<{
   question?: Question | null
@@ -13,6 +15,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useQuestionStore()
+const { dialogState, closeDialog, showInfoDialog } = useDialog()
 
 const form = ref<Question>({
   title: '',
@@ -84,13 +87,24 @@ const handleSubmit = async () => {
     resetForm()
   } catch (error) {
     console.error('保存题目失败:', error)
-    alert('保存失败，请检查输入')
+    await showInfoDialog('保存失败，请检查输入', '保存失败')
   }
 }
 </script>
 
 <template>
   <form class="question-form" @submit.prevent="handleSubmit">
+    <BaseDialog
+      :visible="dialogState.visible"
+      :title="dialogState.title"
+      :message="dialogState.message"
+      :confirm-text="dialogState.confirmText"
+      :cancel-text="dialogState.cancelText"
+      :show-cancel="dialogState.showCancel"
+      :tone="dialogState.tone"
+      @confirm="closeDialog(true)"
+      @cancel="closeDialog(false)"
+    />
     <div class="form-body">
       <div class="form-group">
         <label>题目类型 <span class="required">*</span></label>

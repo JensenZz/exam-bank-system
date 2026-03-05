@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useQuestionStore } from '../stores/questionStore'
 import type { Question, ExamLevel } from '../types'
 import QuestionForm from '../components/QuestionForm.vue'
+import BaseDialog from '../components/BaseDialog.vue'
+import { useDialog } from '../composables/useDialog'
 
 const store = useQuestionStore()
 
@@ -15,6 +17,10 @@ const qualificationKeyword = ref('')
 const examLevels: ExamLevel[] = ['初级', '中级', '高级']
 const showAddModal = ref(false)
 const editingQuestion = ref<Question | null>(null)
+const selectedQuestionIds = ref<Set<number>>(new Set())
+const isBatchDeleting = ref(false)
+
+const { dialogState, closeDialog, showConfirmDialog } = useDialog()
 
 const questionTypes = [
   { value: 'single', label: '单选题' },
@@ -55,6 +61,16 @@ onMounted(() => {
   store.loadQuestions()
 })
 
+watch(
+  () => filteredQuestions.value.map((q) => Number(q.id)).filter((id) => Number.isFinite(id)),
+  (visibleIds) => {
+    selectedQuestionIds.value = new Set(
+      Array.from(selectedQuestionIds.value).filter((id) => visibleIds.includes(id))
+    )
+  },
+  { immediate: true }
+)
+
 const handleSearch = () => {
   store.loadQuestions({
     keyword: searchKeyword.value,
@@ -66,13 +82,86 @@ const handleSearch = () => {
   })
 }
 
+const visibleQuestionIds = computed(() =>
+  filteredQuestions.value
+    .map((q) => Number(q.id))
+    .filter((id) => Number.isFinite(id))
+)
+
+const allVisibleSelected = computed(() =>
+  visibleQuestionIds.value.length > 0 &&
+  visibleQuestionIds.value.every((id) => selectedQuestionIds.value.has(id))
+)
+
+const toggleSelectAllVisible = () => {
+  if (allVisibleSelected.value) {
+    selectedQuestionIds.value = new Set(
+      Array.from(selectedQuestionIds.value).filter((id) => !visibleQuestionIds.value.includes(id))
+    )
+    return
+  }
+
+  selectedQuestionIds.value = new Set([
+    ...Array.from(selectedQuestionIds.value),
+    ...visibleQuestionIds.value
+  ])
+}
+
+const toggleSelectQuestion = (id: number) => {
+  if (!Number.isFinite(id)) {
+    return
+  }
+
+  if (selectedQuestionIds.value.has(id)) {
+    selectedQuestionIds.value = new Set(Array.from(selectedQuestionIds.value).filter((item) => item !== id))
+    return
+  }
+
+  selectedQuestionIds.value = new Set([...Array.from(selectedQuestionIds.value), id])
+}
+
+const handleDeleteSelected = async () => {
+  if (selectedQuestionIds.value.size === 0 || isBatchDeleting.value) {
+    return
+  }
+
+  const ids = Array.from(selectedQuestionIds.value)
+  const confirmed = await showConfirmDialog(`确定要删除已选择的 ${ids.length} 道题目吗？此操作不可恢复。`, {
+    title: '批量删除确认',
+    confirmText: '删除',
+    cancelText: '取消',
+    tone: 'danger'
+  })
+
+  if (!confirmed) {
+    return
+  }
+
+  isBatchDeleting.value = true
+  try {
+    for (const id of ids) {
+      await store.deleteQuestion(id)
+    }
+    selectedQuestionIds.value = new Set()
+  } finally {
+    isBatchDeleting.value = false
+  }
+}
+
 const handleEdit = (question: Question) => {
   editingQuestion.value = { ...question }
   showAddModal.value = true
 }
 
 const handleDelete = async (id: number) => {
-  if (confirm('确定要删除这道题目吗？')) {
+  const confirmed = await showConfirmDialog('确定要删除这道题目吗？', {
+    title: '删除确认',
+    confirmText: '删除',
+    cancelText: '取消',
+    tone: 'danger'
+  })
+
+  if (confirmed) {
     await store.deleteQuestion(id)
   }
 }
@@ -89,6 +178,17 @@ const getDifficultyLabel = (level: number) => {
 
 <template>
   <div class="library-page">
+    <BaseDialog
+      :visible="dialogState.visible"
+      :title="dialogState.title"
+      :message="dialogState.message"
+      :confirm-text="dialogState.confirmText"
+      :cancel-text="dialogState.cancelText"
+      :show-cancel="dialogState.showCancel"
+      :tone="dialogState.tone"
+      @confirm="closeDialog(true)"
+      @cancel="closeDialog(false)"
+    />
     <header class="page-header">
       <h1>题库管理</h1>
       <button class="btn-primary" @click="showAddModal = true; editingQuestion = null">
@@ -154,6 +254,21 @@ const getDifficultyLabel = (level: number) => {
       <button class="btn-secondary" @click="handleSearch">搜索</button>
     </div>
 
+    <div v-if="filteredQuestions.length > 0" class="batch-toolbar">
+      <label class="select-all-label">
+        <input type="checkbox" :checked="allVisibleSelected" @change="toggleSelectAllVisible" />
+        <span>全选当前列表 ({{ visibleQuestionIds.length }})</span>
+      </label>
+      <span class="selected-count">已选 {{ selectedQuestionIds.size }} 道</span>
+      <button
+        class="btn-danger"
+        :disabled="selectedQuestionIds.size === 0 || isBatchDeleting"
+        @click="handleDeleteSelected"
+      >
+        {{ isBatchDeleting ? '删除中...' : `删除已选 (${selectedQuestionIds.size})` }}
+      </button>
+    </div>
+
     <div class="question-list">
       <div v-if="store.isLoading" class="loading-state">
         加载中...
@@ -172,8 +287,16 @@ const getDifficultyLabel = (level: number) => {
           v-for="question in filteredQuestions"
           :key="question.id"
           class="question-card"
+          :class="{ selected: question.id && selectedQuestionIds.has(question.id) }"
         >
           <div class="question-header">
+            <label class="question-select-label" :title="`选择题目 #${question.id}`">
+              <input
+                type="checkbox"
+                :checked="question.id ? selectedQuestionIds.has(question.id) : false"
+                @change="question.id && toggleSelectQuestion(question.id)"
+              />
+            </label>
             <span class="question-type" :class="question.type">
               {{ getTypeLabel(question.type) }}
             </span>
@@ -287,6 +410,30 @@ const getDifficultyLabel = (level: number) => {
   cursor: pointer;
 }
 
+.batch-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #606266;
+  font-size: 14px;
+}
+
+.selected-count {
+  color: #909399;
+  font-size: 14px;
+}
+
 .question-list {
   flex: 1;
   overflow-y: auto;
@@ -310,10 +457,21 @@ const getDifficultyLabel = (level: number) => {
   box-shadow: 0 4px 12px rgba(0,0,0,0.1);
 }
 
+.question-card.selected {
+  border: 1px solid #409eff;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.15);
+}
+
 .question-header {
   display: flex;
   gap: 8px;
   margin-bottom: 12px;
+  align-items: center;
+}
+
+.question-select-label {
+  display: inline-flex;
+  align-items: center;
 }
 
 .question-type {
@@ -416,6 +574,21 @@ const getDifficultyLabel = (level: number) => {
   border-radius: 6px;
   font-size: 14px;
   cursor: pointer;
+}
+
+.btn-danger {
+  padding: 8px 14px;
+  background: #f56c6c;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .btn-icon {

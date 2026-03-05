@@ -2,6 +2,8 @@
 import { ref, onMounted } from 'vue'
 import { useQuestionStore } from '../stores/questionStore'
 import type { PracticeSession, PracticeRecordDetail, ExamLevel } from '../types'
+import BaseDialog from '../components/BaseDialog.vue'
+import { useDialog } from '../composables/useDialog'
 
 const store = useQuestionStore()
 
@@ -14,6 +16,8 @@ const selectedExamYear = ref<number | null>(null)
 const selectedExamLevel = ref<ExamLevel | ''>('')
 const qualificationKeyword = ref('')
 const examLevels: ExamLevel[] = ['初级', '中级', '高级']
+
+const { dialogState, closeDialog, showInfoDialog } = useDialog()
 
 const loadSessions = async () => {
   loadingSessions.value = true
@@ -29,7 +33,7 @@ const loadSessions = async () => {
     }
   } catch (error) {
     console.error('加载成绩会话失败:', error)
-    alert('加载成绩会话失败')
+    await showInfoDialog('加载成绩会话失败', '加载失败')
   } finally {
     loadingSessions.value = false
   }
@@ -42,7 +46,7 @@ const viewSessionDetail = async (sessionId: number) => {
     details.value = await store.getPracticeSessionDetails(sessionId)
   } catch (error) {
     console.error('加载成绩明细失败:', error)
-    alert('加载成绩明细失败')
+    await showInfoDialog('加载成绩明细失败', '加载失败')
   } finally {
     loadingDetails.value = false
   }
@@ -62,6 +66,17 @@ onMounted(() => {
 
 <template>
   <div class="history-page">
+    <BaseDialog
+      :visible="dialogState.visible"
+      :title="dialogState.title"
+      :message="dialogState.message"
+      :confirm-text="dialogState.confirmText"
+      :cancel-text="dialogState.cancelText"
+      :show-cancel="dialogState.showCancel"
+      :tone="dialogState.tone"
+      @confirm="closeDialog(true)"
+      @cancel="closeDialog(false)"
+    />
     <header class="page-header">
       <h1>成绩记录</h1>
       <p class="subtitle">查看每次练习的汇总与明细</p>

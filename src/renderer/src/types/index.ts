@@ -51,6 +51,16 @@ export interface ElectronAPI {
     getPracticeSessions: (filters?: Pick<QuestionFilters, 'examYear' | 'examLevel' | 'qualificationKeyword'>) => Promise<PracticeSession[]>
     getPracticeSessionDetails: (sessionId: number) => Promise<PracticeRecordDetail[]>
     savePracticeResult: (payload: SavePracticeResultInput) => Promise<SavePracticeResultOutput>
+    createImportSession: (payload: CreateImportSessionInput) => Promise<ImportSession>
+    updateImportSessionMetadata: (sessionId: number, metadata: UpdateImportSessionMetadataInput) => Promise<ImportSession>
+    saveImportOcrResult: (sessionId: number, payload: SaveImportOcrResultInput) => Promise<ImportSession>
+    upsertImportChunks: (sessionId: number, chunks: ImportChunkInput[]) => Promise<ImportChunkUpsertResult>
+    saveImportChunkResult: (sessionId: number, chunkIndex: number, payload: SaveImportChunkResultInput) => Promise<SaveImportChunkResultOutput>
+    listImportSessions: (filters?: ImportSessionFilters) => Promise<ImportSession[]>
+    getImportSessionDetails: (sessionId: number) => Promise<ImportSessionDetails>
+    getImportResumeContext: (sessionId: number) => Promise<ImportResumeContext>
+    markImportSessionStatus: (sessionId: number, status: ImportSessionStatus, errorMessage?: string) => Promise<ImportSession>
+    completeImportSession: (sessionId: number, summary: CompleteImportSessionInput) => Promise<ImportSession>
   }
   file: {
     selectPdf: () => Promise<string[]>
@@ -170,6 +180,130 @@ export interface PracticeRecordDetail {
   examYear?: number
   examLevel?: ExamLevel
   qualificationName?: string
+}
+
+export type ImportSessionStatus =
+  | 'created'
+  | 'ocr_processing'
+  | 'ocr_completed'
+  | 'ai_processing'
+  | 'preview_ready'
+  | 'importing'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+
+export type ImportChunkStatus = 'pending' | 'processing' | 'success' | 'failed'
+
+export interface CreateImportSessionInput {
+  filePath: string
+  fileName?: string
+  examYear?: number
+  examLevel?: ExamLevel
+  qualificationName?: string
+}
+
+export interface UpdateImportSessionMetadataInput {
+  filePath?: string
+  fileName?: string
+  examYear?: number
+  examLevel?: ExamLevel
+  qualificationName?: string
+}
+
+export interface SaveImportOcrResultInput {
+  ocrText: string
+  ocrTextLength?: number
+  ocrTotalPages?: number
+}
+
+export interface ImportChunkInput {
+  chunkIndex: number
+  chunkText: string
+  status?: ImportChunkStatus
+}
+
+export interface SaveImportChunkResultInput {
+  status: ImportChunkStatus
+  questions?: ExtractedQuestion[]
+  categories?: ExtractedCategory[]
+  errorMessage?: string
+}
+
+export interface CompleteImportSessionInput {
+  importedQuestionCount: number
+  previewQuestionCount?: number
+}
+
+export interface ImportSession {
+  id: number
+  filePath: string
+  fileName: string
+  examYear?: number
+  examLevel?: ExamLevel
+  qualificationName?: string
+  status: ImportSessionStatus
+  ocrText?: string
+  ocrTextLength: number
+  ocrTotalPages: number
+  chunkTotal: number
+  chunkSuccess: number
+  chunkFailed: number
+  previewQuestionCount: number
+  importedQuestionCount: number
+  lastError?: string
+  createdAt?: string
+  updatedAt?: string
+  completedAt?: string
+}
+
+export interface ImportSessionChunk {
+  id: number
+  sessionId: number
+  chunkIndex: number
+  chunkText: string
+  status: ImportChunkStatus
+  attemptCount: number
+  questionsJson?: string
+  categoriesJson?: string
+  errorMessage?: string
+  createdAt?: string
+  updatedAt?: string
+  completedAt?: string
+}
+
+export interface ImportChunkUpsertResult {
+  session: ImportSession
+  total: number
+  success: number
+  failed: number
+  previewQuestionCount: number
+}
+
+export interface SaveImportChunkResultOutput {
+  session: ImportSession
+  chunk: ImportSessionChunk
+}
+
+export interface ImportSessionDetails {
+  session: ImportSession
+  chunks: ImportSessionChunk[]
+}
+
+export interface ImportResumeContext {
+  session: ImportSession
+  chunks: ImportSessionChunk[]
+  resumableChunks: ImportSessionChunk[]
+  aggregatedPreview: {
+    questions: ExtractedQuestion[]
+    categories: ExtractedCategory[]
+  }
+}
+
+export interface ImportSessionFilters {
+  status?: ImportSessionStatus
+  excludeCompleted?: boolean
+  limit?: number
 }
 
 declare global {

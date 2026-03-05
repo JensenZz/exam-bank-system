@@ -14,7 +14,17 @@ const electronAPI = {
     addPracticeRecords: (records: any[]) => ipcRenderer.invoke('db:addPracticeRecords', records),
     getPracticeSessions: (filters?: any) => ipcRenderer.invoke('db:getPracticeSessions', filters),
     getPracticeSessionDetails: (sessionId: number) => ipcRenderer.invoke('db:getPracticeSessionDetails', sessionId),
-    savePracticeResult: (payload: any) => ipcRenderer.invoke('db:savePracticeResult', payload)
+    savePracticeResult: (payload: any) => ipcRenderer.invoke('db:savePracticeResult', payload),
+    createImportSession: (payload: any) => ipcRenderer.invoke('db:createImportSession', payload),
+    updateImportSessionMetadata: (sessionId: number, metadata: any) => ipcRenderer.invoke('db:updateImportSessionMetadata', sessionId, metadata),
+    saveImportOcrResult: (sessionId: number, payload: any) => ipcRenderer.invoke('db:saveImportOcrResult', sessionId, payload),
+    upsertImportChunks: (sessionId: number, chunks: any[]) => ipcRenderer.invoke('db:upsertImportChunks', sessionId, chunks),
+    saveImportChunkResult: (sessionId: number, chunkIndex: number, payload: any) => ipcRenderer.invoke('db:saveImportChunkResult', sessionId, chunkIndex, payload),
+    listImportSessions: (filters?: any) => ipcRenderer.invoke('db:listImportSessions', filters),
+    getImportSessionDetails: (sessionId: number) => ipcRenderer.invoke('db:getImportSessionDetails', sessionId),
+    getImportResumeContext: (sessionId: number) => ipcRenderer.invoke('db:getImportResumeContext', sessionId),
+    markImportSessionStatus: (sessionId: number, status: string, errorMessage?: string) => ipcRenderer.invoke('db:markImportSessionStatus', sessionId, status, errorMessage),
+    completeImportSession: (sessionId: number, summary: any) => ipcRenderer.invoke('db:completeImportSession', sessionId, summary)
   },
 
   // 文件操作

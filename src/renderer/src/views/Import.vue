@@ -1,13 +1,22 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useImportStore } from '../stores/importStore'
 import { useQuestionStore } from '../stores/questionStore'
 import AiConfig from '../components/AiConfig.vue'
 import QuestionList from '../components/QuestionList.vue'
 import ProgressIndicator from '../components/ProgressIndicator.vue'
 import type { AiServiceConfig } from '../types/ai'
-import type { ExamLevel } from '../types'
+import type {
+  ExamLevel,
+  ImportChunkStatus,
+  ImportSession,
+  ImportSessionChunk,
+  ImportSessionDetails,
+  ImportSessionStatus
+} from '../types'
 
+const router = useRouter()
 const importStore = useImportStore()
 const questionStore = useQuestionStore()
 
@@ -18,6 +27,22 @@ const examYear = ref<number | null>(new Date().getFullYear())
 const examLevel = ref<ExamLevel | ''>('')
 const qualificationName = ref('')
 const examLevels: ExamLevel[] = ['初级', '中级', '高级']
+const pendingResumeSessionId = ref<number | null>(null)
+const pendingRetrySessionId = ref<number | null>(null)
+
+type HistoryFilter = 'all' | 'incomplete' | 'failed' | 'completed'
+const historyFilter = ref<HistoryFilter>('all')
+
+const showChunkDrawer = ref(false)
+const chunkDetailsLoading = ref(false)
+const chunkDetailsError = ref<string | null>(null)
+const selectedSessionDetails = ref<ImportSessionDetails | null>(null)
+
+const metadataSnapshot = computed(() => ({
+  examYear: Number(examYear.value),
+  examLevel: examLevel.value,
+  qualificationName: qualificationName.value.trim()
+}))
 
 const currentStep = computed<'select' | 'config' | 'processing' | 'preview' | 'complete'>(() => {
   if (importStore.progress.status === 'processing') return 'processing'
@@ -26,12 +51,109 @@ const currentStep = computed<'select' | 'config' | 'processing' | 'preview' | 'c
   if (importStore.selectedFiles.length > 0) return 'config'
   return 'select'
 })
+
 const extractStatusMessage = ref('')
 const extractProgress = ref<{ page?: number; totalPages?: number; stage: 'text' | 'ocr' } | null>(null)
 
 let stopExtractProgressListener: (() => void) | null = null
 
-// 页面加载时自动读取已保存的 AI 配置
+const progress = computed(() => {
+  if (importStore.progress.total === 0) return 0
+  return Math.round((importStore.progress.current / importStore.progress.total) * 100)
+})
+
+const canStartImport = computed(() => {
+  const validYear = Number.isFinite(metadataSnapshot.value.examYear) && metadataSnapshot.value.examYear >= 1900 && metadataSnapshot.value.examYear <= 2100
+  const validLevel = Boolean(metadataSnapshot.value.examLevel)
+  const validQualification = metadataSnapshot.value.qualificationName.length > 0
+  return validYear && validLevel && validQualification
+})
+
+const sessionStatusTextMap: Record<ImportSessionStatus, string> = {
+  created: '已创建',
+  ocr_processing: 'OCR处理中',
+  ocr_completed: 'OCR完成',
+  ai_processing: 'AI处理中',
+  preview_ready: '待确认入库',
+  importing: '入库中',
+  completed: '已完成',
+  failed: '失败',
+  canceled: '已取消'
+}
+
+const chunkStatusTextMap: Record<ImportChunkStatus, string> = {
+  pending: '待处理',
+  processing: '处理中',
+  success: '成功',
+  failed: '失败'
+}
+
+const resumeConfigRequiredStatus: ImportSessionStatus[] = ['ocr_completed', 'ai_processing', 'failed']
+
+const historyCounts = computed(() => {
+  const sessions = importStore.historySessions
+  return {
+    all: sessions.length,
+    incomplete: sessions.filter((session) => session.status !== 'completed' && session.status !== 'canceled').length,
+    failed: sessions.filter((session) => session.status === 'failed').length,
+    completed: sessions.filter((session) => session.status === 'completed').length
+  }
+})
+
+const filteredHistorySessions = computed(() => {
+  const sessions = importStore.historySessions
+  if (historyFilter.value === 'incomplete') {
+    return sessions.filter((session) => session.status !== 'completed' && session.status !== 'canceled')
+  }
+  if (historyFilter.value === 'failed') {
+    return sessions.filter((session) => session.status === 'failed')
+  }
+  if (historyFilter.value === 'completed') {
+    return sessions.filter((session) => session.status === 'completed')
+  }
+  return sessions
+})
+
+const selectedSessionChunks = computed(() => {
+  if (!selectedSessionDetails.value) return []
+  return [...selectedSessionDetails.value.chunks].sort((a, b) => a.chunkIndex - b.chunkIndex)
+})
+
+const selectedChunkSummary = computed(() => {
+  return selectedSessionChunks.value.reduce(
+    (acc, chunk) => {
+      acc.total += 1
+      if (chunk.status === 'success') acc.success += 1
+      if (chunk.status === 'failed') acc.failed += 1
+      if (chunk.status === 'processing') acc.processing += 1
+      if (chunk.status === 'pending') acc.pending += 1
+      return acc
+    },
+    { total: 0, success: 0, failed: 0, processing: 0, pending: 0 }
+  )
+})
+
+watch(
+  metadataSnapshot,
+  (value) => {
+    if (!canStartImport.value || !value.examLevel) {
+      importStore.metadata = null
+      return
+    }
+
+    importStore.metadata = {
+      examYear: value.examYear,
+      examLevel: value.examLevel,
+      qualificationName: value.qualificationName
+    }
+
+    if (error.value === '请先填写完整的年份、级别和资格名称') {
+      error.value = null
+    }
+  },
+  { immediate: true }
+)
+
 onMounted(async () => {
   try {
     const savedConfig = await window.electronAPI.config.load()
@@ -41,6 +163,8 @@ onMounted(async () => {
   } catch (err) {
     console.error('加载 AI 配置失败:', err)
   }
+
+  await importStore.loadImportHistory({ limit: 30 })
 
   stopExtractProgressListener = window.electronAPI.file.onExtractPdfTextProgress((payload) => {
     extractStatusMessage.value = payload.message
@@ -57,19 +181,36 @@ onBeforeUnmount(() => {
   stopExtractProgressListener = null
 })
 
-const progress = computed(() => {
-  if (importStore.progress.total === 0) return 0
-  return Math.round((importStore.progress.current / importStore.progress.total) * 100)
-})
+const applySessionMetadata = (session: ImportSession) => {
+  if (Number.isFinite(Number(session.examYear))) {
+    examYear.value = Number(session.examYear)
+  }
+  examLevel.value = session.examLevel || ''
+  qualificationName.value = session.qualificationName || ''
 
-const canStartImport = computed(() => {
-  const validYear = Number.isFinite(Number(examYear.value)) && Number(examYear.value) >= 1900 && Number(examYear.value) <= 2100
-  const validLevel = Boolean(examLevel.value)
-  const validQualification = qualificationName.value.trim().length > 0
-  return validYear && validLevel && validQualification
-})
+  if (
+    Number.isFinite(Number(session.examYear)) &&
+    session.examLevel &&
+    session.qualificationName
+  ) {
+    importStore.metadata = {
+      examYear: Number(session.examYear),
+      examLevel: session.examLevel,
+      qualificationName: session.qualificationName
+    }
+  } else {
+    importStore.metadata = null
+  }
+}
 
-// 处理文件选择
+const refreshHistory = async () => {
+  await importStore.loadImportHistory({ limit: 30 })
+
+  if (showChunkDrawer.value && selectedSessionDetails.value?.session.id) {
+    await openChunkDrawer(selectedSessionDetails.value.session.id)
+  }
+}
+
 const handleFileSelect = async () => {
   try {
     const files = await window.electronAPI.file.selectPdf()
@@ -77,6 +218,8 @@ const handleFileSelect = async () => {
       const selectedFile = files[0]
       importStore.selectedFiles = [selectedFile]
       importStore.progress.status = 'idle'
+      importStore.progress.current = 0
+      importStore.progress.total = 0
       error.value = files.length > 1 ? '一次仅支持导入 1 个 PDF，已自动保留第一个文件。' : null
     }
   } catch (err) {
@@ -84,47 +227,45 @@ const handleFileSelect = async () => {
   }
 }
 
-// 处理拖拽上传
 const handleDrop = (e: DragEvent) => {
   e.preventDefault()
   const files = Array.from(e.dataTransfer?.files || [])
-    .filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf'))
-    .map(f => f.path)
+    .filter((f) => f.type === 'application/pdf' || f.name.endsWith('.pdf'))
+    .map((f) => f.path)
 
   if (files.length > 0) {
     importStore.progress.status = 'idle'
+    importStore.progress.current = 0
+    importStore.progress.total = 0
     importStore.selectedFiles = [files[0]]
     error.value = files.length > 1 ? '一次仅支持导入 1 个 PDF，已自动保留第一个文件。' : null
   }
 }
 
-// 处理 AI 配置确认
-const handleConfigReady = async (config: AiServiceConfig) => {
-  aiConfig.value = config
-  showAiConfig.value = false
-  await startImport()
-}
-
-// 开始导入流程
 const startImport = async () => {
   if (!aiConfig.value || importStore.selectedFiles.length === 0) return
-  if (!canStartImport.value) {
+  if (!canStartImport.value || !metadataSnapshot.value.examLevel) {
     error.value = '请先填写完整的年份、级别和资格名称'
     return
   }
 
+  importStore.metadata = {
+    examYear: metadataSnapshot.value.examYear,
+    examLevel: metadataSnapshot.value.examLevel,
+    qualificationName: metadataSnapshot.value.qualificationName
+  }
+
   importStore.progress.status = 'processing'
+  importStore.progress.total = importStore.selectedFiles.length
+  importStore.progress.current = 0
   error.value = null
   extractStatusMessage.value = '准备开始处理...'
   extractProgress.value = null
 
   try {
-    importStore.progress.total = importStore.selectedFiles.length
-    importStore.progress.current = 0
-
     for (const file of importStore.selectedFiles) {
       await importStore.startImport(file, aiConfig.value)
-      importStore.progress.current++
+      importStore.progress.current += 1
     }
 
     extractStatusMessage.value = '处理完成，正在生成预览...'
@@ -140,32 +281,104 @@ const startImport = async () => {
   }
 }
 
-// 确认导入到题库
+const runResume = async (sessionId: number) => {
+  importStore.progress.status = 'processing'
+  importStore.progress.total = 1
+  importStore.progress.current = 0
+  error.value = null
+  extractStatusMessage.value = '正在恢复导入会话...'
+  extractProgress.value = null
+
+  try {
+    await importStore.resumeImport(sessionId, aiConfig.value || undefined)
+    importStore.progress.current = 1
+
+    const latest = importStore.historySessions.find((item) => item.id === sessionId)
+    if (latest?.status === 'completed') {
+      importStore.progress.status = 'completed'
+    } else {
+      importStore.progress.status = 'idle'
+    }
+
+    if (importStore.metadata) {
+      examYear.value = importStore.metadata.examYear
+      examLevel.value = importStore.metadata.examLevel
+      qualificationName.value = importStore.metadata.qualificationName
+    }
+  } catch (err) {
+    error.value = '继续导入失败：' + (err as Error).message
+    importStore.progress.status = 'idle'
+  } finally {
+    if (importStore.progress.status !== 'processing') {
+      extractProgress.value = null
+      importStore.aiChunkProgress = null
+    }
+  }
+}
+
+const handleResumeSession = async (session: ImportSession) => {
+  if (session.status === 'completed') {
+    await goLibrary()
+    return
+  }
+
+  applySessionMetadata(session)
+  importStore.selectedFiles = session.filePath ? [session.filePath] : []
+  importStore.currentFile = session.filePath
+  importStore.activeSessionId = session.id
+
+  if (!aiConfig.value && resumeConfigRequiredStatus.includes(session.status)) {
+    pendingResumeSessionId.value = session.id
+    showAiConfig.value = true
+    return
+  }
+
+  await runResume(session.id)
+}
+
+const handleConfigReady = async (config: AiServiceConfig) => {
+  aiConfig.value = config
+  showAiConfig.value = false
+
+  if (pendingResumeSessionId.value) {
+    const sessionId = pendingResumeSessionId.value
+    pendingResumeSessionId.value = null
+    await runResume(sessionId)
+    return
+  }
+
+  if (pendingRetrySessionId.value) {
+    const sessionId = pendingRetrySessionId.value
+    pendingRetrySessionId.value = null
+    await runRetryFailedChunks(sessionId)
+    return
+  }
+
+  if (importStore.selectedFiles.length > 0) {
+    await startImport()
+  }
+}
+
 const handleConfirmImport = async () => {
   try {
-    if (!canStartImport.value || !examLevel.value) {
+    const currentMetadata = importStore.metadata
+    if (!currentMetadata || !currentMetadata.examLevel) {
       error.value = '请先填写完整的年份、级别和资格名称'
       return
     }
 
-    await importStore.confirmImport({
-      examYear: Number(examYear.value),
-      examLevel: examLevel.value,
-      qualificationName: qualificationName.value.trim()
-    })
+    await importStore.confirmImport(currentMetadata)
     importStore.progress.status = 'completed'
+    importStore.metadata = null
 
-    // 刷新题库数据
     await questionStore.loadQuestions()
   } catch (err) {
     error.value = '保存失败：' + (err as Error).message
   }
 }
 
-// 重新开始
 const handleRestart = () => {
   importStore.selectedFiles = []
-  aiConfig.value = null
   error.value = null
   examYear.value = new Date().getFullYear()
   examLevel.value = ''
@@ -173,17 +386,165 @@ const handleRestart = () => {
   extractStatusMessage.value = ''
   extractProgress.value = null
   importStore.reset()
+  importStore.metadata = null
   importStore.progress.status = 'idle'
+  pendingResumeSessionId.value = null
+  pendingRetrySessionId.value = null
+  closeChunkDrawer()
 }
 
-// 获取文件名
-const getFileName = (path: string) => {
-  return path.split('\\').pop()?.split('/').pop() || path
-}
-
-// 移除文件
 const removeFile = (index: number) => {
-  importStore.selectedFiles.splice(index, 1)
+  importStore.selectedFiles = importStore.selectedFiles.filter((_, i) => i !== index)
+}
+
+const getFileName = (targetPath: string, fallback?: string) => {
+  if (fallback) return fallback
+  if (!targetPath) return '-'
+  return targetPath.split('\\').pop()?.split('/').pop() || targetPath
+}
+
+const formatDateTime = (value?: string) => {
+  if (!value) return '-'
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return value
+  return new Date(timestamp).toLocaleString()
+}
+
+const getStatusText = (status: ImportSessionStatus) => {
+  return sessionStatusTextMap[status] || status
+}
+
+const getStatusClass = (status: ImportSessionStatus) => {
+  if (status === 'completed') return 'status-completed'
+  if (status === 'failed') return 'status-failed'
+  if (status === 'preview_ready') return 'status-preview'
+  if (status === 'ai_processing' || status === 'ocr_processing' || status === 'importing') return 'status-processing'
+  return 'status-default'
+}
+
+const getSessionProgressText = (session: ImportSession) => {
+  if (session.chunkTotal <= 0) return '分片：-'
+  return `分片：${session.chunkSuccess}/${session.chunkTotal} 成功，${session.chunkFailed} 失败`
+}
+
+const getChunkStatusText = (status: ImportChunkStatus) => {
+  return chunkStatusTextMap[status] || status
+}
+
+const getChunkStatusClass = (status: ImportChunkStatus) => {
+  if (status === 'success') return 'status-completed'
+  if (status === 'failed') return 'status-failed'
+  if (status === 'processing') return 'status-processing'
+  return 'status-default'
+}
+
+const parseJsonArrayLength = (value?: string) => {
+  if (!value) return 0
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.length : 0
+  } catch {
+    return 0
+  }
+}
+
+const getChunkQuestionCount = (chunk: ImportSessionChunk) => {
+  return parseJsonArrayLength(chunk.questionsJson)
+}
+
+const getChunkCategoryCount = (chunk: ImportSessionChunk) => {
+  return parseJsonArrayLength(chunk.categoriesJson)
+}
+
+const getChunkTextPreview = (text: string) => {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return '-'
+  if (normalized.length <= 140) return normalized
+  return `${normalized.slice(0, 140)}...`
+}
+
+const closeChunkDrawer = () => {
+  showChunkDrawer.value = false
+  chunkDetailsLoading.value = false
+  chunkDetailsError.value = null
+  selectedSessionDetails.value = null
+}
+
+const openChunkDrawer = async (sessionId: number) => {
+  showChunkDrawer.value = true
+  chunkDetailsLoading.value = true
+  chunkDetailsError.value = null
+
+  try {
+    const details = await importStore.getImportSessionDetails(sessionId)
+    selectedSessionDetails.value = details
+  } catch (err) {
+    chunkDetailsError.value = '加载分片详情失败：' + (err as Error).message
+    selectedSessionDetails.value = null
+  } finally {
+    chunkDetailsLoading.value = false
+  }
+}
+
+const handleViewChunkDetails = async (session: ImportSession) => {
+  await openChunkDrawer(session.id)
+}
+
+const runRetryFailedChunks = async (sessionId: number) => {
+  importStore.progress.status = 'processing'
+  importStore.progress.total = 1
+  importStore.progress.current = 0
+  error.value = null
+  extractStatusMessage.value = '正在重试失败分片...'
+  extractProgress.value = null
+
+  try {
+    await importStore.retryFailedChunks(sessionId, aiConfig.value || undefined)
+    importStore.progress.current = 1
+    importStore.progress.status = 'idle'
+
+    if (importStore.metadata) {
+      examYear.value = importStore.metadata.examYear
+      examLevel.value = importStore.metadata.examLevel
+      qualificationName.value = importStore.metadata.qualificationName
+    }
+
+    if (showChunkDrawer.value && selectedSessionDetails.value?.session.id === sessionId) {
+      await openChunkDrawer(sessionId)
+    }
+  } catch (err) {
+    error.value = '重试失败分片失败：' + (err as Error).message
+    importStore.progress.status = 'idle'
+  } finally {
+    if (importStore.progress.status !== 'processing') {
+      extractProgress.value = null
+      importStore.aiChunkProgress = null
+    }
+  }
+}
+
+const handleRetryFailedChunks = async (session: ImportSession) => {
+  if (session.chunkFailed <= 0) {
+    error.value = '当前会话没有失败分片可重试'
+    return
+  }
+
+  applySessionMetadata(session)
+  importStore.selectedFiles = session.filePath ? [session.filePath] : []
+  importStore.currentFile = session.filePath
+  importStore.activeSessionId = session.id
+
+  if (!aiConfig.value) {
+    pendingRetrySessionId.value = session.id
+    showAiConfig.value = true
+    return
+  }
+
+  await runRetryFailedChunks(session.id)
+}
+
+const goLibrary = async () => {
+  await router.push('/library')
 }
 </script>
 
@@ -194,7 +555,86 @@ const removeFile = (index: number) => {
       <p class="subtitle">使用 AI 智能识别 PDF 中的题目并自动导入</p>
     </header>
 
-    <!-- 步骤指示器 -->
+    <section class="history-panel">
+      <div class="history-header">
+        <h2>导入历史</h2>
+        <button class="btn-link" @click="refreshHistory">刷新</button>
+      </div>
+
+      <div class="history-filter" v-if="!importStore.historyLoading && importStore.historySessions.length > 0">
+        <button
+          class="filter-chip"
+          :class="{ active: historyFilter === 'all' }"
+          @click="historyFilter = 'all'"
+        >
+          全部 ({{ historyCounts.all }})
+        </button>
+        <button
+          class="filter-chip"
+          :class="{ active: historyFilter === 'incomplete' }"
+          @click="historyFilter = 'incomplete'"
+        >
+          未完成 ({{ historyCounts.incomplete }})
+        </button>
+        <button
+          class="filter-chip"
+          :class="{ active: historyFilter === 'failed' }"
+          @click="historyFilter = 'failed'"
+        >
+          失败 ({{ historyCounts.failed }})
+        </button>
+        <button
+          class="filter-chip"
+          :class="{ active: historyFilter === 'completed' }"
+          @click="historyFilter = 'completed'"
+        >
+          已完成 ({{ historyCounts.completed }})
+        </button>
+      </div>
+
+      <div v-if="importStore.historyLoading" class="history-state">加载历史中...</div>
+      <div v-else-if="filteredHistorySessions.length === 0" class="history-state">当前筛选下暂无导入记录</div>
+      <div v-else class="history-list">
+        <article v-for="session in filteredHistorySessions" :key="session.id" class="history-card">
+          <div class="history-main">
+            <div class="history-title-row">
+              <strong class="history-file">{{ getFileName(session.filePath, session.fileName) }}</strong>
+              <span class="status-badge" :class="getStatusClass(session.status)">{{ getStatusText(session.status) }}</span>
+            </div>
+
+            <div class="history-meta">
+              <span>时间：{{ formatDateTime(session.createdAt) }}</span>
+              <span>范围：{{ session.examYear || '-' }} / {{ session.examLevel || '-' }} / {{ session.qualificationName || '-' }}</span>
+              <span>{{ getSessionProgressText(session) }}</span>
+            </div>
+
+            <div v-if="session.lastError" class="history-error">
+              最近错误：{{ session.lastError }}
+            </div>
+          </div>
+
+          <div class="history-actions">
+            <button class="btn-secondary" @click="handleViewChunkDetails(session)">查看分片详情</button>
+            <button
+              v-if="session.chunkFailed > 0 && session.status !== 'completed'"
+              class="btn-secondary"
+              @click="handleRetryFailedChunks(session)"
+            >
+              重试失败分片
+            </button>
+            <button
+              v-if="session.status !== 'completed'"
+              class="btn-secondary"
+              @click="handleResumeSession(session)"
+            >
+              继续导入
+            </button>
+            <button v-else class="btn-secondary" @click="goLibrary">查看题库</button>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <div class="step-indicator">
       <div class="step" :class="{ active: currentStep === 'select', completed: currentStep !== 'select' }">
         <div class="step-number">1</div>
@@ -212,7 +652,6 @@ const removeFile = (index: number) => {
       </div>
     </div>
 
-    <!-- 错误提示 -->
     <div v-if="error" class="error-alert">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
         <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
@@ -221,7 +660,6 @@ const removeFile = (index: number) => {
       <button class="btn-close" @click="error = null">×</button>
     </div>
 
-    <!-- 步骤 1: 选择文件 -->
     <div v-if="currentStep === 'select'" class="step-content">
       <div
         class="upload-area"
@@ -246,7 +684,6 @@ const removeFile = (index: number) => {
       </div>
     </div>
 
-    <!-- 步骤 2: AI 配置 -->
     <div v-if="currentStep === 'config'" class="step-content">
       <div class="file-list">
         <h3>已选择的文件</h3>
@@ -303,7 +740,6 @@ const removeFile = (index: number) => {
       </div>
     </div>
 
-    <!-- 步骤 3: 处理中 -->
     <div v-if="currentStep === 'processing'" class="step-content">
       <div class="processing-state">
         <ProgressIndicator :progress="progress" size="large" />
@@ -328,8 +764,21 @@ const removeFile = (index: number) => {
       </div>
     </div>
 
-    <!-- 步骤 4: 预览确认 -->
     <div v-if="currentStep === 'preview'" class="step-content">
+      <div class="metadata-preview" :class="{ invalid: !importStore.metadata }">
+        <h3>当前导入元数据</h3>
+        <template v-if="importStore.metadata">
+          <div class="metadata-tags">
+            <span class="meta-tag">年份：{{ importStore.metadata.examYear }}</span>
+            <span class="meta-tag">级别：{{ importStore.metadata.examLevel }}</span>
+            <span class="meta-tag">资格：{{ importStore.metadata.qualificationName }}</span>
+          </div>
+        </template>
+        <template v-else>
+          <p class="metadata-warning">未检测到完整元数据，请返回上一步补全后再确认导入。</p>
+        </template>
+      </div>
+
       <QuestionList
         :questions="importStore.questions"
         :categories="importStore.categories"
@@ -338,7 +787,6 @@ const removeFile = (index: number) => {
       />
     </div>
 
-    <!-- 步骤 5: 完成 -->
     <div v-if="currentStep === 'complete'" class="step-content">
       <div class="complete-state">
         <div class="success-icon">
@@ -357,8 +805,62 @@ const removeFile = (index: number) => {
       </div>
     </div>
 
-    <!-- AI 配置弹窗 -->
     <AiConfig v-model="showAiConfig" @config-ready="handleConfigReady" />
+
+    <div v-if="showChunkDrawer" class="chunk-drawer-mask" @click.self="closeChunkDrawer">
+      <aside class="chunk-drawer">
+        <div class="chunk-drawer-header">
+          <h3>分片详情</h3>
+          <button class="btn-close" @click="closeChunkDrawer">×</button>
+        </div>
+
+        <div v-if="chunkDetailsLoading" class="chunk-state">加载分片详情中...</div>
+        <div v-else-if="chunkDetailsError" class="chunk-state chunk-state-error">{{ chunkDetailsError }}</div>
+        <template v-else-if="selectedSessionDetails">
+          <div class="chunk-session-meta">
+            <div>
+              <strong>文件：</strong>{{ getFileName(selectedSessionDetails.session.filePath, selectedSessionDetails.session.fileName) }}
+            </div>
+            <div>
+              <strong>状态：</strong>
+              <span class="status-badge" :class="getStatusClass(selectedSessionDetails.session.status)">
+                {{ getStatusText(selectedSessionDetails.session.status) }}
+              </span>
+            </div>
+            <div>
+              <strong>统计：</strong>
+              总 {{ selectedChunkSummary.total }} / 成功 {{ selectedChunkSummary.success }} / 失败 {{ selectedChunkSummary.failed }} /
+              处理中 {{ selectedChunkSummary.processing }} / 待处理 {{ selectedChunkSummary.pending }}
+            </div>
+          </div>
+
+          <div v-if="selectedSessionChunks.length === 0" class="chunk-state">当前会话没有分片记录</div>
+          <div v-else class="chunk-list">
+            <article v-for="chunk in selectedSessionChunks" :key="chunk.id" class="chunk-card">
+              <div class="chunk-title-row">
+                <strong>分片 #{{ chunk.chunkIndex }}</strong>
+                <span class="status-badge" :class="getChunkStatusClass(chunk.status)">
+                  {{ getChunkStatusText(chunk.status) }}
+                </span>
+              </div>
+
+              <div class="chunk-meta">
+                <span>尝试次数：{{ chunk.attemptCount }}</span>
+                <span>题目数：{{ getChunkQuestionCount(chunk) }}</span>
+                <span>分类数：{{ getChunkCategoryCount(chunk) }}</span>
+                <span>更新时间：{{ formatDateTime(chunk.updatedAt || chunk.createdAt) }}</span>
+              </div>
+
+              <p class="chunk-preview">{{ getChunkTextPreview(chunk.chunkText) }}</p>
+
+              <div v-if="chunk.errorMessage" class="chunk-error">
+                错误：{{ chunk.errorMessage }}
+              </div>
+            </article>
+          </div>
+        </template>
+      </aside>
+    </div>
   </div>
 </template>
 
@@ -371,7 +873,7 @@ const removeFile = (index: number) => {
 
 .page-header {
   text-align: center;
-  margin-bottom: 32px;
+  margin-bottom: 24px;
 }
 
 .page-header h1 {
@@ -386,7 +888,155 @@ const removeFile = (index: number) => {
   font-size: 14px;
 }
 
-/* 步骤指示器 */
+.history-panel {
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  margin-bottom: 24px;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.history-header h2 {
+  margin: 0;
+  font-size: 16px;
+  color: #303133;
+}
+
+.history-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.filter-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid #dcdfe6;
+  background: #fff;
+  color: #606266;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.filter-chip.active {
+  color: #409eff;
+  border-color: #b3d8ff;
+  background: #ecf5ff;
+}
+
+.history-state {
+  padding: 8px 0;
+  color: #909399;
+  font-size: 13px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.history-card {
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.history-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.history-file {
+  color: #303133;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.status-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.status-default {
+  color: #909399;
+  background: #f4f4f5;
+  border-color: #e9e9eb;
+}
+
+.status-processing {
+  color: #409eff;
+  background: #ecf5ff;
+  border-color: #d9ecff;
+}
+
+.status-preview {
+  color: #e6a23c;
+  background: #fdf6ec;
+  border-color: #faecd8;
+}
+
+.status-completed {
+  color: #67c23a;
+  background: #f0f9eb;
+  border-color: #e1f3d8;
+}
+
+.status-failed {
+  color: #f56c6c;
+  background: #fef0f0;
+  border-color: #fde2e2;
+}
+
+.history-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.history-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #f56c6c;
+  background: #fef0f0;
+  border: 1px solid #fde2e2;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.history-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .step-indicator {
   display: flex;
   align-items: center;
@@ -448,7 +1098,6 @@ const removeFile = (index: number) => {
   background: #67c23a;
 }
 
-/* 错误提示 */
 .error-alert {
   display: flex;
   align-items: center;
@@ -470,7 +1119,6 @@ const removeFile = (index: number) => {
   cursor: pointer;
 }
 
-/* 上传区域 */
 .upload-area {
   border: 2px dashed #dcdfe6;
   border-radius: 12px;
@@ -505,7 +1153,6 @@ const removeFile = (index: number) => {
   font-size: 12px !important;
 }
 
-/* 文件列表 */
 .file-list {
   background: white;
   border-radius: 12px;
@@ -549,7 +1196,6 @@ const removeFile = (index: number) => {
   justify-content: center;
 }
 
-/* 按钮 */
 .btn-primary {
   display: inline-flex;
   align-items: center;
@@ -576,13 +1222,14 @@ const removeFile = (index: number) => {
 .btn-secondary {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  padding: 12px 24px;
+  padding: 8px 12px;
   background: #f5f7fa;
   color: #606266;
   border: 1px solid #dcdfe6;
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 13px;
   cursor: pointer;
   transition: all 0.2s;
 }
@@ -662,7 +1309,6 @@ const removeFile = (index: number) => {
   text-decoration: underline;
 }
 
-/* 处理中状态 */
 .processing-state {
   text-align: center;
   padding: 60px 40px;
@@ -696,7 +1342,47 @@ const removeFile = (index: number) => {
   color: #909399;
 }
 
-/* 完成状态 */
+.metadata-preview {
+  background: #f0f9ff;
+  border: 1px solid #d9ecff;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.metadata-preview.invalid {
+  background: #fef0f0;
+  border-color: #fde2e2;
+}
+
+.metadata-preview h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: #303133;
+}
+
+.metadata-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: #409eff;
+  background: #ecf5ff;
+}
+
+.metadata-warning {
+  margin: 0;
+  font-size: 13px;
+  color: #f56c6c;
+}
+
 .complete-state {
   text-align: center;
   padding: 60px 40px;
@@ -721,5 +1407,107 @@ const removeFile = (index: number) => {
   display: flex;
   justify-content: center;
   gap: 16px;
+}
+
+.chunk-drawer-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 1000;
+}
+
+.chunk-drawer {
+  width: min(720px, 96vw);
+  height: 100%;
+  background: #fff;
+  box-shadow: -6px 0 20px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+}
+
+.chunk-drawer-header {
+  padding: 16px;
+  border-bottom: 1px solid #ebeef5;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.chunk-drawer-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #303133;
+}
+
+.chunk-state {
+  padding: 16px;
+  font-size: 13px;
+  color: #909399;
+}
+
+.chunk-state-error {
+  color: #f56c6c;
+}
+
+.chunk-session-meta {
+  padding: 12px 16px;
+  border-bottom: 1px solid #f2f6fc;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.chunk-list {
+  padding: 12px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+}
+
+.chunk-card {
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.chunk-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.chunk-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 8px;
+}
+
+.chunk-preview {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #606266;
+  background: #f5f7fa;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.chunk-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #f56c6c;
+  background: #fef0f0;
+  border: 1px solid #fde2e2;
+  border-radius: 6px;
+  padding: 6px 8px;
 }
 </style>

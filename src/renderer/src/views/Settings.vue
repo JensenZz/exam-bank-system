@@ -1,5 +1,16 @@
 <template>
   <div class="settings-page">
+    <BaseDialog
+      :visible="dialogState.visible"
+      :title="dialogState.title"
+      :message="dialogState.message"
+      :confirm-text="dialogState.confirmText"
+      :cancel-text="dialogState.cancelText"
+      :show-cancel="dialogState.showCancel"
+      :tone="dialogState.tone"
+      @confirm="closeDialog(true)"
+      @cancel="closeDialog(false)"
+    />
     <header class="page-header">
       <h1>⚙️ 系统设置</h1>
     </header>
@@ -176,6 +187,8 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import type { AiServiceConfig } from '../types/ai'
+import BaseDialog from '../components/BaseDialog.vue'
+import { useDialog } from '../composables/useDialog'
 
 const config = ref<AiServiceConfig>({
   provider: 'openai',
@@ -190,6 +203,8 @@ const config = ref<AiServiceConfig>({
 const isTesting = ref(false)
 const isSaving = ref(false)
 const testResult = ref<{ success: boolean; message: string } | null>(null)
+
+const { dialogState, closeDialog, showDialog, showInfoDialog, showConfirmDialog } = useDialog()
 
 const defaultPromptTemplate = `请从以下 PDF 文本中提取题目，并以 JSON 格式返回。
 
@@ -315,17 +330,22 @@ const testConnection = async () => {
 // 保存配置
 const saveConfig = async () => {
   if (!config.value.apiKey || !config.value.model) {
-    alert('请填写 API 密钥和模型名称')
+    await showInfoDialog('请填写 API 密钥和模型名称', '校验失败')
     return
   }
 
   isSaving.value = true
   try {
     await window.electronAPI.config.save({ ...config.value })
-    alert('配置保存成功！')
+    await showDialog({
+      title: '保存成功',
+      message: '配置保存成功！',
+      confirmText: '好的',
+      tone: 'success'
+    })
     testResult.value = null
   } catch (error) {
-    alert('保存失败: ' + (error as Error).message)
+    await showInfoDialog('保存失败: ' + (error as Error).message, '保存失败')
   } finally {
     isSaving.value = false
   }
@@ -346,7 +366,7 @@ const exportData = async () => {
     a.click()
     URL.revokeObjectURL(url)
   } catch (error) {
-    alert('导出失败: ' + (error as Error).message)
+    await showInfoDialog('导出失败: ' + (error as Error).message, '导出失败')
   }
 }
 
@@ -362,15 +382,27 @@ const importData = () => {
     try {
       const text = await file.text()
       const data = JSON.parse(text)
+      const total = Array.isArray(data.questions) ? data.questions.length : 0
+      const confirmed = await showConfirmDialog(`确定要导入 ${total} 道题目吗？`, {
+        title: '导入确认',
+        confirmText: '开始导入',
+        cancelText: '取消',
+        tone: 'default'
+      })
 
-      if (confirm(`确定要导入 ${data.questions?.length || 0} 道题目吗？`)) {
+      if (confirmed) {
         for (const q of data.questions || []) {
           await window.electronAPI.db.addQuestion(q)
         }
-        alert('导入成功！')
+        await showDialog({
+          title: '导入成功',
+          message: '导入成功！',
+          confirmText: '好的',
+          tone: 'success'
+        })
       }
     } catch (error) {
-      alert('导入失败: ' + (error as Error).message)
+      await showInfoDialog('导入失败: ' + (error as Error).message, '导入失败')
     }
   }
   input.click()

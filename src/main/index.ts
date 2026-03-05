@@ -23,6 +23,99 @@ function ensureColumn(tableName: string, columnName: string, definition: string)
   }
 }
 
+type ImportSessionStatus =
+  | 'created'
+  | 'ocr_processing'
+  | 'ocr_completed'
+  | 'ai_processing'
+  | 'preview_ready'
+  | 'importing'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+
+type ImportChunkStatus = 'pending' | 'processing' | 'success' | 'failed'
+
+type ImportChunkSummary = {
+  total: number
+  success: number
+  failed: number
+  previewQuestionCount: number
+}
+
+const IMPORT_SESSION_STATUSES: ImportSessionStatus[] = [
+  'created',
+  'ocr_processing',
+  'ocr_completed',
+  'ai_processing',
+  'preview_ready',
+  'importing',
+  'completed',
+  'failed',
+  'canceled'
+]
+
+const IMPORT_CHUNK_STATUSES: ImportChunkStatus[] = ['pending', 'processing', 'success', 'failed']
+
+function normalizeImportSessionStatus(value: unknown, fallback: ImportSessionStatus = 'created'): ImportSessionStatus {
+  const safeValue = String(value || '').trim() as ImportSessionStatus
+  return IMPORT_SESSION_STATUSES.includes(safeValue) ? safeValue : fallback
+}
+
+function normalizeImportChunkStatus(value: unknown, fallback: ImportChunkStatus = 'pending'): ImportChunkStatus {
+  const safeValue = String(value || '').trim() as ImportChunkStatus
+  return IMPORT_CHUNK_STATUSES.includes(safeValue) ? safeValue : fallback
+}
+
+function getImportSessionById(sessionId: number) {
+  if (!db) return null
+  return db.prepare('SELECT * FROM import_sessions WHERE id = ?').get(sessionId)
+}
+
+function parseQuestionCountFromJson(value: unknown): number {
+  if (typeof value !== 'string' || !value.trim()) {
+    return 0
+  }
+
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.length : 0
+  } catch {
+    return 0
+  }
+}
+
+function getImportChunkSummary(sessionId: number): ImportChunkSummary {
+  if (!db) {
+    return { total: 0, success: 0, failed: 0, previewQuestionCount: 0 }
+  }
+
+  const rows = db
+    .prepare(`
+      SELECT status, questions_json
+      FROM import_session_chunks
+      WHERE session_id = ?
+    `)
+    .all(sessionId) as Array<{ status: string; questions_json: string | null }>
+
+  const summary = rows.reduce(
+    (acc, row) => {
+      acc.total += 1
+      if (row.status === 'success') {
+        acc.success += 1
+        acc.previewQuestionCount += parseQuestionCountFromJson(row.questions_json)
+      }
+      if (row.status === 'failed') {
+        acc.failed += 1
+      }
+      return acc
+    },
+    { total: 0, success: 0, failed: 0, previewQuestionCount: 0 }
+  )
+
+  return summary
+}
+
 function createWindow(): void {
   // Create the browser window.
   mainWindow = new BrowserWindow({
@@ -139,6 +232,54 @@ function initDatabase(): void {
     )
   `)
 
+  // 创建 AI 导入会话表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS import_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_path TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      exam_year INTEGER,
+      exam_level TEXT,
+      qualification_name TEXT,
+      status TEXT NOT NULL DEFAULT 'created',
+      ocr_text TEXT,
+      ocr_text_length INTEGER DEFAULT 0,
+      ocr_total_pages INTEGER DEFAULT 0,
+      chunk_total INTEGER DEFAULT 0,
+      chunk_success INTEGER DEFAULT 0,
+      chunk_failed INTEGER DEFAULT 0,
+      preview_question_count INTEGER DEFAULT 0,
+      imported_question_count INTEGER DEFAULT 0,
+      last_error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME
+    )
+  `)
+
+  // 创建 AI 导入分片表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS import_session_chunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      chunk_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      questions_json TEXT,
+      categories_json TEXT,
+      error_message TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME,
+      UNIQUE(session_id, chunk_index)
+    )
+  `)
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_import_sessions_status_created_at ON import_sessions(status, created_at DESC)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_import_sessions_created_at ON import_sessions(created_at DESC)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_import_session_chunks_session_status ON import_session_chunks(session_id, status)')
+
   // 增量迁移（幂等）
   ensureColumn('questions', 'exam_year', 'exam_year INTEGER')
   ensureColumn('questions', 'exam_level', 'exam_level TEXT')
@@ -146,6 +287,32 @@ function initDatabase(): void {
 
   ensureColumn('practice_records', 'session_id', 'session_id INTEGER')
   ensureColumn('practice_records', 'question_order', 'question_order INTEGER')
+
+  ensureColumn('import_sessions', 'file_name', 'file_name TEXT')
+  ensureColumn('import_sessions', 'exam_year', 'exam_year INTEGER')
+  ensureColumn('import_sessions', 'exam_level', 'exam_level TEXT')
+  ensureColumn('import_sessions', 'qualification_name', 'qualification_name TEXT')
+  ensureColumn('import_sessions', 'status', "status TEXT NOT NULL DEFAULT 'created'")
+  ensureColumn('import_sessions', 'ocr_text', 'ocr_text TEXT')
+  ensureColumn('import_sessions', 'ocr_text_length', 'ocr_text_length INTEGER DEFAULT 0')
+  ensureColumn('import_sessions', 'ocr_total_pages', 'ocr_total_pages INTEGER DEFAULT 0')
+  ensureColumn('import_sessions', 'chunk_total', 'chunk_total INTEGER DEFAULT 0')
+  ensureColumn('import_sessions', 'chunk_success', 'chunk_success INTEGER DEFAULT 0')
+  ensureColumn('import_sessions', 'chunk_failed', 'chunk_failed INTEGER DEFAULT 0')
+  ensureColumn('import_sessions', 'preview_question_count', 'preview_question_count INTEGER DEFAULT 0')
+  ensureColumn('import_sessions', 'imported_question_count', 'imported_question_count INTEGER DEFAULT 0')
+  ensureColumn('import_sessions', 'last_error', 'last_error TEXT')
+  ensureColumn('import_sessions', 'updated_at', 'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP')
+  ensureColumn('import_sessions', 'completed_at', 'completed_at DATETIME')
+
+  ensureColumn('import_session_chunks', 'chunk_text', 'chunk_text TEXT')
+  ensureColumn('import_session_chunks', 'status', "status TEXT NOT NULL DEFAULT 'pending'")
+  ensureColumn('import_session_chunks', 'attempt_count', 'attempt_count INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('import_session_chunks', 'questions_json', 'questions_json TEXT')
+  ensureColumn('import_session_chunks', 'categories_json', 'categories_json TEXT')
+  ensureColumn('import_session_chunks', 'error_message', 'error_message TEXT')
+  ensureColumn('import_session_chunks', 'updated_at', 'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP')
+  ensureColumn('import_session_chunks', 'completed_at', 'completed_at DATETIME')
 
   console.log('数据库初始化完成:', dbPath)
 }
@@ -526,6 +693,526 @@ ipcMain.handle('db:getPracticeSessionDetails', (_, sessionId: number) => {
   `).all(safeSessionId)
 })
 
+ipcMain.handle('db:createImportSession', (_, payload) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const filePath = String(payload?.filePath || '').trim()
+  if (!filePath) {
+    throw new Error('文件路径不能为空')
+  }
+
+  const fileName = String(payload?.fileName || path.basename(filePath) || '').trim()
+  if (!fileName) {
+    throw new Error('文件名不能为空')
+  }
+
+  const examYear = Number.isFinite(Number(payload?.examYear)) ? Number(payload.examYear) : null
+  const examLevel = payload?.examLevel ? String(payload.examLevel).trim() : null
+  const qualificationName = payload?.qualificationName ? String(payload.qualificationName).trim() : null
+
+  const stmt = db.prepare(`
+    INSERT INTO import_sessions (
+      file_path,
+      file_name,
+      exam_year,
+      exam_level,
+      qualification_name,
+      status,
+      last_error
+    )
+    VALUES (?, ?, ?, ?, ?, 'created', NULL)
+  `)
+
+  const result = stmt.run(filePath, fileName, examYear, examLevel, qualificationName)
+  const sessionId = Number(result.lastInsertRowid)
+  return getImportSessionById(sessionId)
+})
+
+ipcMain.handle('db:updateImportSessionMetadata', (_, sessionId: number, metadata) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const safeSessionId = Number(sessionId)
+  if (!Number.isFinite(safeSessionId)) {
+    throw new Error('会话 ID 不合法')
+  }
+
+  const existing = getImportSessionById(safeSessionId) as {
+    file_path: string
+    file_name: string
+    exam_year: number | null
+    exam_level: string | null
+    qualification_name: string | null
+  } | null
+
+  if (!existing) {
+    throw new Error('导入会话不存在')
+  }
+
+  const hasFilePath = Object.prototype.hasOwnProperty.call(metadata || {}, 'filePath')
+  const hasFileName = Object.prototype.hasOwnProperty.call(metadata || {}, 'fileName')
+  const hasExamYear = Object.prototype.hasOwnProperty.call(metadata || {}, 'examYear')
+  const hasExamLevel = Object.prototype.hasOwnProperty.call(metadata || {}, 'examLevel')
+  const hasQualificationName = Object.prototype.hasOwnProperty.call(metadata || {}, 'qualificationName')
+
+  const filePath = hasFilePath ? String(metadata?.filePath || '').trim() || null : existing.file_path
+  const fileName = hasFileName ? String(metadata?.fileName || '').trim() || null : existing.file_name
+  const examYear = hasExamYear
+    ? (Number.isFinite(Number(metadata?.examYear)) ? Number(metadata.examYear) : null)
+    : existing.exam_year
+  const examLevel = hasExamLevel ? (metadata?.examLevel ? String(metadata.examLevel).trim() : null) : existing.exam_level
+  const qualificationName = hasQualificationName
+    ? (metadata?.qualificationName ? String(metadata.qualificationName).trim() : null)
+    : existing.qualification_name
+
+  db.prepare(`
+    UPDATE import_sessions
+    SET
+      file_path = COALESCE(?, file_path),
+      file_name = COALESCE(?, file_name),
+      exam_year = ?,
+      exam_level = ?,
+      qualification_name = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(filePath, fileName, examYear, examLevel, qualificationName, safeSessionId)
+
+  return getImportSessionById(safeSessionId)
+})
+
+ipcMain.handle('db:saveImportOcrResult', (_, sessionId: number, payload) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const safeSessionId = Number(sessionId)
+  if (!Number.isFinite(safeSessionId)) {
+    throw new Error('会话 ID 不合法')
+  }
+
+  const session = getImportSessionById(safeSessionId)
+  if (!session) {
+    throw new Error('导入会话不存在')
+  }
+
+  const ocrText = String(payload?.ocrText || payload?.text || '')
+  const ocrTextLength = Number.isFinite(Number(payload?.ocrTextLength))
+    ? Number(payload.ocrTextLength)
+    : ocrText.length
+  const ocrTotalPages = Number.isFinite(Number(payload?.ocrTotalPages)) ? Number(payload.ocrTotalPages) : 0
+
+  db.prepare(`
+    UPDATE import_sessions
+    SET
+      ocr_text = ?,
+      ocr_text_length = ?,
+      ocr_total_pages = ?,
+      status = 'ocr_completed',
+      last_error = NULL,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(ocrText, ocrTextLength, ocrTotalPages, safeSessionId)
+
+  return getImportSessionById(safeSessionId)
+})
+
+ipcMain.handle('db:upsertImportChunks', (_, sessionId: number, chunks) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const safeSessionId = Number(sessionId)
+  if (!Number.isFinite(safeSessionId)) {
+    throw new Error('会话 ID 不合法')
+  }
+
+  const session = getImportSessionById(safeSessionId)
+  if (!session) {
+    throw new Error('导入会话不存在')
+  }
+
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    throw new Error('分片数据不能为空')
+  }
+
+  const uniqueChunkIndexes = new Set<number>()
+
+  const normalizedChunks = chunks.map((chunk) => {
+    const chunkIndex = Number(chunk?.chunkIndex)
+    const chunkText = String(chunk?.chunkText || '').trim()
+    if (!Number.isFinite(chunkIndex) || chunkIndex < 1 || !chunkText) {
+      throw new Error('分片参数不合法')
+    }
+
+    if (uniqueChunkIndexes.has(chunkIndex)) {
+      throw new Error(`分片序号重复: ${chunkIndex}`)
+    }
+    uniqueChunkIndexes.add(chunkIndex)
+
+    return {
+      chunkIndex,
+      chunkText,
+      status: normalizeImportChunkStatus(chunk?.status, 'pending')
+    }
+  })
+
+  const upsertStmt = db.prepare(`
+    INSERT INTO import_session_chunks (
+      session_id,
+      chunk_index,
+      chunk_text,
+      status
+    )
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(session_id, chunk_index)
+    DO UPDATE SET
+      chunk_text = excluded.chunk_text,
+      updated_at = CURRENT_TIMESTAMP,
+      status = CASE
+        WHEN import_session_chunks.status = 'processing' THEN 'pending'
+        ELSE import_session_chunks.status
+      END
+  `)
+
+  const transaction = db.transaction((items: Array<{ chunkIndex: number; chunkText: string; status: ImportChunkStatus }>) => {
+    for (const item of items) {
+      upsertStmt.run(safeSessionId, item.chunkIndex, item.chunkText, item.status)
+    }
+
+    const summary = getImportChunkSummary(safeSessionId)
+
+    db!.prepare(`
+      UPDATE import_sessions
+      SET
+        chunk_total = ?,
+        chunk_success = ?,
+        chunk_failed = ?,
+        preview_question_count = ?,
+        status = 'ai_processing',
+        last_error = NULL,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(summary.total, summary.success, summary.failed, summary.previewQuestionCount, safeSessionId)
+
+    return summary
+  })
+
+  const summary = transaction(normalizedChunks)
+
+  return {
+    session: getImportSessionById(safeSessionId),
+    ...summary
+  }
+})
+
+ipcMain.handle('db:saveImportChunkResult', (_, sessionId: number, chunkIndex: number, payload) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const safeSessionId = Number(sessionId)
+  const safeChunkIndex = Number(chunkIndex)
+  if (!Number.isFinite(safeSessionId) || !Number.isFinite(safeChunkIndex) || safeChunkIndex < 1) {
+    throw new Error('分片结果参数不合法')
+  }
+
+  const session = getImportSessionById(safeSessionId)
+  if (!session) {
+    throw new Error('导入会话不存在')
+  }
+
+  const status = normalizeImportChunkStatus(payload?.status, 'failed')
+  const questionsJson = payload?.questions ? JSON.stringify(payload.questions) : null
+  const categoriesJson = payload?.categories ? JSON.stringify(payload.categories) : null
+  const errorMessage = payload?.errorMessage ? String(payload.errorMessage) : null
+
+  const chunkExists = db
+    .prepare('SELECT id FROM import_session_chunks WHERE session_id = ? AND chunk_index = ?')
+    .get(safeSessionId, safeChunkIndex)
+
+  if (!chunkExists) {
+    throw new Error('导入分片不存在，请先创建分片')
+  }
+
+  const transaction = db.transaction(() => {
+    db!.prepare(`
+      UPDATE import_session_chunks
+      SET
+        status = ?,
+        attempt_count = attempt_count + CASE WHEN ? IN ('success', 'failed') THEN 1 ELSE 0 END,
+        questions_json = ?,
+        categories_json = ?,
+        error_message = ?,
+        completed_at = CASE WHEN ? IN ('success', 'failed') THEN CURRENT_TIMESTAMP ELSE NULL END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE session_id = ? AND chunk_index = ?
+    `).run(status, status, questionsJson, categoriesJson, errorMessage, status, safeSessionId, safeChunkIndex)
+
+    const countsRows = db!
+      .prepare(`
+        SELECT status, COUNT(1) AS count
+        FROM import_session_chunks
+        WHERE session_id = ?
+        GROUP BY status
+      `)
+      .all(safeSessionId) as Array<{ status: string; count: number }>
+
+    const counts = countsRows.reduce(
+      (acc, row) => {
+        const key = normalizeImportChunkStatus(row.status)
+        acc[key] += Number(row.count || 0)
+        return acc
+      },
+      { pending: 0, processing: 0, success: 0, failed: 0 }
+    )
+
+    const summary = getImportChunkSummary(safeSessionId)
+
+    let nextStatus: ImportSessionStatus = 'ai_processing'
+    if (summary.total > 0 && summary.success === summary.total) {
+      nextStatus = 'preview_ready'
+    } else if (counts.failed > 0 && counts.pending === 0 && counts.processing === 0) {
+      nextStatus = 'failed'
+    }
+
+    const resolvedLastError = nextStatus === 'preview_ready'
+      ? null
+      : status === 'failed'
+        ? (errorMessage || 'AI 分片解析失败')
+        : String(session.last_error || '') || null
+
+    db!.prepare(`
+      UPDATE import_sessions
+      SET
+        chunk_total = ?,
+        chunk_success = ?,
+        chunk_failed = ?,
+        preview_question_count = ?,
+        status = ?,
+        last_error = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      summary.total,
+      summary.success,
+      summary.failed,
+      summary.previewQuestionCount,
+      nextStatus,
+      resolvedLastError,
+      safeSessionId
+    )
+  })
+
+  transaction()
+
+  return {
+    session: getImportSessionById(safeSessionId),
+    chunk: db
+      .prepare('SELECT * FROM import_session_chunks WHERE session_id = ? AND chunk_index = ?')
+      .get(safeSessionId, safeChunkIndex)
+  }
+})
+
+ipcMain.handle('db:listImportSessions', (_, filters) => {
+  if (!db) return []
+
+  let sql = 'SELECT * FROM import_sessions WHERE 1=1'
+  const params: Array<string | number> = []
+
+  const status = String(filters?.status || '').trim()
+  if (status && IMPORT_SESSION_STATUSES.includes(status as ImportSessionStatus)) {
+    sql += ' AND status = ?'
+    params.push(status)
+  }
+
+  if (filters?.excludeCompleted) {
+    sql += " AND status <> 'completed'"
+  }
+
+  sql += ' ORDER BY created_at DESC'
+
+  const safeLimit = Number(filters?.limit)
+  if (Number.isFinite(safeLimit) && safeLimit > 0) {
+    sql += ' LIMIT ?'
+    params.push(Math.min(safeLimit, 200))
+  }
+
+  return db.prepare(sql).all(...params)
+})
+
+ipcMain.handle('db:getImportSessionDetails', (_, sessionId: number) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const safeSessionId = Number(sessionId)
+  if (!Number.isFinite(safeSessionId)) {
+    throw new Error('会话 ID 不合法')
+  }
+
+  const session = getImportSessionById(safeSessionId)
+  if (!session) {
+    throw new Error('导入会话不存在')
+  }
+
+  const chunks = db
+    .prepare(`
+      SELECT *
+      FROM import_session_chunks
+      WHERE session_id = ?
+      ORDER BY chunk_index ASC
+    `)
+    .all(safeSessionId)
+
+  return {
+    session,
+    chunks
+  }
+})
+
+ipcMain.handle('db:getImportResumeContext', (_, sessionId: number) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const safeSessionId = Number(sessionId)
+  if (!Number.isFinite(safeSessionId)) {
+    throw new Error('会话 ID 不合法')
+  }
+
+  const session = getImportSessionById(safeSessionId)
+  if (!session) {
+    throw new Error('导入会话不存在')
+  }
+
+  const chunks = db
+    .prepare(`
+      SELECT *
+      FROM import_session_chunks
+      WHERE session_id = ?
+      ORDER BY chunk_index ASC
+    `)
+    .all(safeSessionId) as Array<{
+      id: number
+      session_id: number
+      chunk_index: number
+      chunk_text: string
+      status: string
+      attempt_count: number
+      questions_json: string | null
+      categories_json: string | null
+      error_message: string | null
+      created_at: string
+      updated_at: string
+      completed_at: string | null
+    }>
+
+  const parsedSuccess = chunks.reduce(
+    (acc, chunk) => {
+      if (chunk.status !== 'success') {
+        return acc
+      }
+
+      if (chunk.questions_json) {
+        try {
+          const parsed = JSON.parse(chunk.questions_json)
+          if (Array.isArray(parsed)) {
+            acc.questions.push(...parsed)
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (chunk.categories_json) {
+        try {
+          const parsed = JSON.parse(chunk.categories_json)
+          if (Array.isArray(parsed)) {
+            acc.categories.push(...parsed)
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      return acc
+    },
+    { questions: [] as unknown[], categories: [] as unknown[] }
+  )
+
+  return {
+    session,
+    chunks,
+    resumableChunks: chunks.filter((chunk) => chunk.status === 'pending' || chunk.status === 'failed'),
+    aggregatedPreview: parsedSuccess
+  }
+})
+
+ipcMain.handle('db:markImportSessionStatus', (_, sessionId: number, status: ImportSessionStatus, errorMessage?: string) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const safeSessionId = Number(sessionId)
+  if (!Number.isFinite(safeSessionId)) {
+    throw new Error('会话 ID 不合法')
+  }
+
+  const session = getImportSessionById(safeSessionId)
+  if (!session) {
+    throw new Error('导入会话不存在')
+  }
+
+  const safeStatus = normalizeImportSessionStatus(status, 'created')
+  const safeErrorMessage = errorMessage ? String(errorMessage) : null
+
+  db.prepare(`
+    UPDATE import_sessions
+    SET
+      status = ?,
+      last_error = ?,
+      completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE completed_at END,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(safeStatus, safeErrorMessage, safeStatus, safeSessionId)
+
+  return getImportSessionById(safeSessionId)
+})
+
+ipcMain.handle('db:completeImportSession', (_, sessionId: number, summary) => {
+  if (!db) throw new Error('数据库未初始化')
+
+  const safeSessionId = Number(sessionId)
+  if (!Number.isFinite(safeSessionId)) {
+    throw new Error('会话 ID 不合法')
+  }
+
+  const session = getImportSessionById(safeSessionId)
+  if (!session) {
+    throw new Error('导入会话不存在')
+  }
+
+  const importedQuestionCount = Number.isFinite(Number(summary?.importedQuestionCount))
+    ? Math.max(0, Number(summary.importedQuestionCount))
+    : 0
+  const previewQuestionCount = Number.isFinite(Number(summary?.previewQuestionCount))
+    ? Math.max(0, Number(summary.previewQuestionCount))
+    : Math.max(0, Number(session.preview_question_count || 0))
+
+  const chunkSummary = getImportChunkSummary(safeSessionId)
+
+  db.prepare(`
+    UPDATE import_sessions
+    SET
+      status = 'completed',
+      chunk_total = ?,
+      chunk_success = ?,
+      chunk_failed = ?,
+      imported_question_count = ?,
+      preview_question_count = ?,
+      last_error = NULL,
+      completed_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    chunkSummary.total,
+    chunkSummary.success,
+    chunkSummary.failed,
+    importedQuestionCount,
+    previewQuestionCount,
+    safeSessionId
+  )
+
+  return getImportSessionById(safeSessionId)
+})
+
 // IPC处理 - 文件操作
 ipcMain.handle('file:selectPdf', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
@@ -644,20 +1331,37 @@ ipcMain.handle('window:close', (event) => {
 })
 
 // App lifecycle
-app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.exam-bank-system')
+app
+  .whenReady()
+  .then(() => {
+    electronApp.setAppUserModelId('com.exam-bank-system')
 
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
+    app.on('browser-window-created', (_, window) => {
+      optimizer.watchWindowShortcuts(window)
+    })
+
+    try {
+      initDatabase()
+    } catch (error) {
+      console.error('数据库初始化失败:', error)
+      dialog.showErrorBox(
+        '应用启动失败',
+        '数据库依赖加载失败（better-sqlite3）。请在项目根目录执行 npm run postinstall 后重试。'
+      )
+      app.quit()
+      return
+    }
+
+    createWindow()
+
+    app.on('activate', function () {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
   })
-
-  initDatabase()
-  createWindow()
-
-  app.on('activate', function () {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  .catch((error) => {
+    console.error('应用启动失败:', error)
+    app.quit()
   })
-})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
