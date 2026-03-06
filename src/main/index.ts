@@ -1245,6 +1245,155 @@ ipcMain.handle('ai:extractQuestions', async (_, text: string, config: any) => {
   return service.extractQuestions(text)
 })
 
+// AI 解题
+ipcMain.handle('ai:solveQuestion', async (_, payload: any) => {
+  try {
+    const { configManager } = await import('./configManager.js')
+    const savedConfig = await configManager.loadConfig()
+
+    const provider = String(savedConfig?.provider || 'openai')
+    const apiKey = String(savedConfig?.apiKey || '')
+    const model = String(savedConfig?.model || '')
+    const endpoint = String(savedConfig?.endpoint || '')
+    const temperature = Number(savedConfig?.temperature)
+    const maxTokens = Number(savedConfig?.maxTokens)
+
+    if (!apiKey || !model) {
+      throw new Error('请先在设置中配置 AI 提供商、API Key 和模型名称')
+    }
+
+    const title = String(payload?.title || '').trim()
+    const content = String(payload?.content || '').trim()
+    const type = String(payload?.type || '').trim()
+    const options = Array.isArray(payload?.options) ? payload.options.map((item: unknown) => String(item || '')) : []
+
+    const optionsText = options.length > 0
+      ? options.map((option, index) => `${String.fromCharCode(65 + index)}. ${option}`).join('\n')
+      : '（无选项）'
+
+    const prompt = [
+      '你是一名严谨的考试辅导老师。请解答下面题目。',
+      '请按以下结构输出：',
+      '1) 题目理解',
+      '2) 解题步骤',
+      '3) 最终答案',
+      '4) 关键考点',
+      '',
+      `题型：${type || '未知'}`,
+      `题目：${title}`,
+      content ? `题干补充：${content}` : '',
+      '选项：',
+      optionsText
+    ]
+      .filter(Boolean)
+      .join('\n')
+
+    const resolvedTemperature = Number.isFinite(temperature) ? temperature : 0.3
+    const resolvedMaxTokens = Number.isFinite(maxTokens) ? maxTokens : 2000
+
+    if (provider === 'aliyun') {
+      const resolvedEndpoint = endpoint || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation'
+      const response = await axios.post(
+        resolvedEndpoint,
+        {
+          model,
+          input: { messages: [{ role: 'user', content: prompt }] },
+          parameters: {
+            temperature: resolvedTemperature,
+            max_tokens: resolvedMaxTokens
+          }
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 120000
+        }
+      )
+
+      const contentText = String(response?.data?.output?.text || '').trim()
+      if (!contentText) {
+        throw new Error('AI 未返回有效解答内容')
+      }
+      return { content: contentText }
+    }
+
+    if (provider === 'baidu') {
+      const resolvedEndpoint = endpoint || 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/completions'
+      const response = await axios.post(
+        resolvedEndpoint,
+        {
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: resolvedTemperature
+        },
+        {
+          params: { access_token: apiKey },
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 120000
+        }
+      )
+
+      const contentText = String(response?.data?.result || '').trim()
+      if (!contentText) {
+        throw new Error('AI 未返回有效解答内容')
+      }
+      return { content: contentText }
+    }
+
+    const resolvedEndpoint = (() => {
+      if (provider === 'custom') {
+        if (!endpoint) {
+          throw new Error('自定义提供商请先配置 API 端点')
+        }
+        return endpoint.endsWith('/chat/completions')
+          ? endpoint
+          : endpoint.replace(/\/$/, '') + '/chat/completions'
+      }
+      return endpoint || 'https://api.openai.com/v1/chat/completions'
+    })()
+
+    const response = await axios.post(
+      resolvedEndpoint,
+      {
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: resolvedTemperature,
+        max_tokens: resolvedMaxTokens
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 120000
+      }
+    )
+
+    const contentText = String(
+      response?.data?.choices?.[0]?.message?.content ||
+        response?.data?.result ||
+        response?.data?.output?.text ||
+        response?.data?.text ||
+        ''
+    ).trim()
+
+    if (!contentText) {
+      throw new Error('AI 未返回有效解答内容')
+    }
+
+    return { content: contentText }
+  } catch (error: any) {
+    const message =
+      error?.response?.data?.error?.message ||
+      error?.response?.data?.message ||
+      error?.message ||
+      'AI 解题失败'
+    throw new Error(String(message))
+  }
+})
+
 // 配置管理
 ipcMain.handle('config:load', async () => {
   const { configManager } = await import('./configManager.js')

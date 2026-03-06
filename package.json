@@ -21,6 +21,7 @@
     "better-sqlite3": "^11.6.0",
     "canvas": "^3.2.1",
     "electron-updater": "^6.3.0",
+    "marked": "^17.0.4",
     "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^5.5.207",
     "pinia": "^2.3.0",

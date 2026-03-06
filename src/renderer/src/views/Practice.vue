@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { marked } from 'marked'
 import { useQuestionStore } from '../stores/questionStore'
 import type { Question, ExamLevel } from '../types'
 import type { PracticeDraft, PracticeDraftFilters, PracticeDraftMode } from '../stores/questionStore'
@@ -31,6 +32,9 @@ const currentDraftId = ref<string | null>(null)
 const activeDraftMode = ref<PracticeDraftMode | null>(null)
 const activeDraftFilters = ref<PracticeDraftFilters>({})
 const isSavingResult = ref(false)
+const isSolvingQuestion = ref(false)
+const aiSolveContent = ref('')
+const aiSolveError = ref('')
 
 // 条件选题
 const selectedExamYear = ref<number | null>(null)
@@ -67,6 +71,23 @@ const progress = computed(() => {
 })
 
 const setupQuestionCount = computed(() => allQuestions.value.length)
+
+const escapeHtml = (input: string) => {
+  return String(input || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+const aiSolveHtml = computed(() => {
+  if (!aiSolveContent.value) {
+    return ''
+  }
+  const safeMarkdown = escapeHtml(aiSolveContent.value)
+  return marked.parse(safeMarkdown, { breaks: true }) as string
+})
 const unfinishedDrafts = computed(() =>
   store.practiceDrafts.filter((draft) => Array.isArray(draft.questions) && draft.questions.length > 0)
 )
@@ -309,6 +330,9 @@ const resetPracticeState = (options?: { keepDraft?: boolean }) => {
   answers.value = {}
   activeDraftMode.value = null
   activeDraftFilters.value = {}
+  isSolvingQuestion.value = false
+  aiSolveContent.value = ''
+  aiSolveError.value = ''
 }
 
 const normalizeAnswer = (answer: string, questionType: Question['type']) => {
@@ -371,6 +395,9 @@ const startPracticeSession = (questions: Question[], mode: PracticeDraftMode, fi
   showAnswer.value = false
   answers.value = {}
   currentDraftId.value = null
+  isSolvingQuestion.value = false
+  aiSolveContent.value = ''
+  aiSolveError.value = ''
   setActivePracticeContext(mode, filters)
   persistActiveDraft()
 }
@@ -474,6 +501,9 @@ const restoreDraftById = async (draftId: string) => {
   selectedAnswer.value = draft.selectedAnswer || resolveSelectedAnswerByIndex(boundedIndex)
   isPracticing.value = true
   currentDraftId.value = draft.id
+  isSolvingQuestion.value = false
+  aiSolveContent.value = ''
+  aiSolveError.value = ''
   setActivePracticeContext(draft.mode, draft.filters)
 
   selectedExamYear.value = draft.filters.examYear ?? null
@@ -544,7 +574,39 @@ const submitAnswer = () => {
   }
   selectedAnswer.value = answer
   showAnswer.value = true
+  aiSolveContent.value = ''
+  aiSolveError.value = ''
   persistActiveDraft()
+}
+
+const solveCurrentQuestion = async () => {
+  if (!currentQuestion.value || !showAnswer.value || isSolvingQuestion.value) {
+    return
+  }
+
+  isSolvingQuestion.value = true
+  aiSolveError.value = ''
+  aiSolveContent.value = ''
+
+  try {
+    const result = await window.electronAPI.ai.solveQuestion({
+      title: String(currentQuestion.value.title || ''),
+      content: currentQuestion.value.content ? String(currentQuestion.value.content) : '',
+      type: currentQuestion.value.type,
+      options: Array.isArray(currentQuestion.value.options)
+        ? currentQuestion.value.options.map((item) => String(item))
+        : []
+    })
+
+    aiSolveContent.value = String(result?.content || '').trim()
+    if (!aiSolveContent.value) {
+      throw new Error('AI 未返回解答内容')
+    }
+  } catch (error) {
+    aiSolveError.value = (error as Error).message || 'AI 解题失败，请稍后重试'
+  } finally {
+    isSolvingQuestion.value = false
+  }
 }
 
 const nextQuestion = () => {
@@ -552,6 +614,9 @@ const nextQuestion = () => {
     currentIndex.value += 1
     selectedAnswer.value = resolveSelectedAnswerByIndex(currentIndex.value)
     showAnswer.value = false
+    isSolvingQuestion.value = false
+    aiSolveContent.value = ''
+    aiSolveError.value = ''
     persistActiveDraft()
   }
 }
@@ -561,6 +626,9 @@ const prevQuestion = () => {
     currentIndex.value -= 1
     selectedAnswer.value = resolveSelectedAnswerByIndex(currentIndex.value)
     showAnswer.value = false
+    isSolvingQuestion.value = false
+    aiSolveContent.value = ''
+    aiSolveError.value = ''
     persistActiveDraft()
   }
 }
@@ -576,6 +644,9 @@ const jumpToQuestion = (targetIndex: number) => {
   currentIndex.value = boundedIndex
   selectedAnswer.value = resolveSelectedAnswerByIndex(boundedIndex)
   showAnswer.value = false
+  isSolvingQuestion.value = false
+  aiSolveContent.value = ''
+  aiSolveError.value = ''
   persistActiveDraft()
 }
 
@@ -1058,6 +1129,18 @@ onBeforeUnmount(() => {
           <div v-if="currentQuestion.analysis" class="analysis-content">
             <span class="label">解析：</span>
             <p>{{ currentQuestion.analysis }}</p>
+          </div>
+
+          <div class="ai-solve-action">
+            <button class="btn-ai" :disabled="isSolvingQuestion" @click="solveCurrentQuestion">
+              {{ isSolvingQuestion ? 'AI 解题中...' : 'AI解题' }}
+            </button>
+          </div>
+
+          <div v-if="aiSolveError" class="ai-solve-error">{{ aiSolveError }}</div>
+          <div v-if="aiSolveContent" class="ai-solve-result">
+            <div class="ai-solve-title">AI解题结果</div>
+            <div class="ai-solve-content markdown-body" v-html="aiSolveHtml"></div>
           </div>
         </div>
       </div>
@@ -1680,6 +1763,144 @@ onBeforeUnmount(() => {
   margin-top: 8px;
   color: #606266;
   line-height: 1.6;
+}
+
+.ai-solve-action {
+  margin-top: 14px;
+}
+
+.btn-ai {
+  padding: 10px 18px;
+  background: #409eff;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn-ai:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ai-solve-error {
+  margin-top: 10px;
+  color: #f56c6c;
+  font-size: 13px;
+}
+
+.ai-solve-result {
+  margin-top: 12px;
+  border: 1px solid #d9ecff;
+  background: #f4f9ff;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.ai-solve-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 8px;
+}
+
+.ai-solve-content {
+  margin: 0;
+  line-height: 1.6;
+  color: #303133;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.markdown-body :deep(p) {
+  margin: 0 0 8px;
+}
+
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.markdown-body :deep(li) {
+  margin-bottom: 4px;
+}
+
+.markdown-body :deep(code) {
+  background: #eef2ff;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.markdown-body :deep(pre) {
+  background: #1f2937;
+  color: #f9fafb;
+  border-radius: 6px;
+  padding: 10px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.markdown-body :deep(pre code) {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4),
+.markdown-body :deep(h5),
+.markdown-body :deep(h6) {
+  margin: 12px 0 8px;
+  color: #1f2937;
+  line-height: 1.35;
+}
+
+.markdown-body :deep(h1) {
+  font-size: 20px;
+}
+
+.markdown-body :deep(h2) {
+  font-size: 18px;
+}
+
+.markdown-body :deep(h3) {
+  font-size: 16px;
+}
+
+.markdown-body :deep(blockquote) {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 4px solid #93c5fd;
+  background: #eff6ff;
+  color: #1e3a8a;
+  border-radius: 4px;
+}
+
+.markdown-body :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 13px;
+}
+
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  border: 1px solid #d1d5db;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-body :deep(th) {
+  background: #f3f4f6;
+  color: #111827;
+  font-weight: 600;
 }
 
 .practice-footer {

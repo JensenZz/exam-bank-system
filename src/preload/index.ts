@@ -41,7 +41,8 @@ const electronAPI = {
 
   // AI 服务
   ai: {
-    extractQuestions: (text: string, config: any) => ipcRenderer.invoke('ai:extractQuestions', text, config)
+    extractQuestions: (text: string, config: any) => ipcRenderer.invoke('ai:extractQuestions', text, config),
+    solveQuestion: (payload: any) => ipcRenderer.invoke('ai:solveQuestion', payload)
   },
 
   // 配置管理

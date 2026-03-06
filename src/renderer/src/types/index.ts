@@ -70,6 +70,12 @@ export interface ElectronAPI {
   }
   ai: {
     extractQuestions: (text: string, config: AiServiceConfig) => Promise<AiResult>
+    solveQuestion: (payload: {
+      title: string
+      content?: string
+      type: 'single' | 'multiple' | 'fill' | 'essay'
+      options?: string[]
+    }) => Promise<{ content: string }>
   }
   config: {
     load: () => Promise<Partial<AiServiceConfig>>
