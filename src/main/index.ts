@@ -5,6 +5,7 @@ import Database from 'better-sqlite3'
 import fs from 'fs'
 import path from 'path'
 import axios from 'axios'
+import { initializeCrawlDatabase, registerCrawlService } from './crawlService.js'
 
 // 数据库实例
 let db: Database | null = null
@@ -314,6 +315,7 @@ function initDatabase(): void {
   ensureColumn('import_session_chunks', 'updated_at', 'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP')
   ensureColumn('import_session_chunks', 'completed_at', 'completed_at DATETIME')
 
+  initializeCrawlDatabase(db)
   console.log('数据库初始化完成:', dbPath)
 }
 
@@ -1503,6 +1505,8 @@ app
 
     createWindow()
 
+    registerCrawlService(() => db, () => mainWindow)
+
     app.on('activate', function () {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
@@ -1518,3 +1522,5 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+
+

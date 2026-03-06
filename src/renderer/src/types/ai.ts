@@ -52,6 +52,10 @@ export interface ExtractedQuestion {
   difficulty?: number
   /** 题目来源 */
   source?: string
+  /** 题目图片 */
+  images?: string[]
+  /** 提示信息 */
+  warnings?: string[]
   /** 考试年份 */
   examYear?: number
   /** 考试级别 */
@@ -95,3 +99,6 @@ export class AiServiceError extends Error {
     this.name = 'AiServiceError'
   }
 }
+
+
+

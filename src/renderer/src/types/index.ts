@@ -22,6 +22,8 @@ export interface ExtractedQuestion {
   categoryName?: string
   difficulty?: number
   source?: string
+  images?: string[]
+  warnings?: string[]
   examYear?: number
   examLevel?: ExamLevel
   qualificationName?: string
@@ -77,6 +79,16 @@ export interface ElectronAPI {
       options?: string[]
     }) => Promise<{ content: string }>
   }
+  crawl: {
+    getSessionByUrl: (url: string) => Promise<CrawlSession | null>
+    openLoginWindow: (payload: { url: string; siteType?: CrawlSiteType }) => Promise<CrawlSession | null>
+    saveManualCookie: (payload: { url: string; siteType?: CrawlSiteType; cookie: string }) => Promise<CrawlSession>
+    createTask: (payload: { url: string; siteType?: CrawlSiteType; sessionRef?: string; aiConfig?: AiServiceConfig }) => Promise<CrawlTask>
+    getTask: (taskId: number) => Promise<CrawlTask>
+    markTaskImporting: (taskId: number) => Promise<CrawlTask>
+    completeTask: (taskId: number, summary?: { importedCount?: number }) => Promise<CrawlTask>
+    failTask: (taskId: number, errorMessage?: string) => Promise<CrawlTask>
+  }
   config: {
     load: () => Promise<Partial<AiServiceConfig>>
     save: (config: AiServiceConfig) => Promise<void>
@@ -112,6 +124,8 @@ export interface QuestionInput {
   categoryId?: number
   difficulty?: number
   source?: string
+  images?: string[]
+  warnings?: string[]
   examYear?: number
   examLevel?: ExamLevel
   qualificationName?: string
@@ -312,8 +326,64 @@ export interface ImportSessionFilters {
   limit?: number
 }
 
+
+export type CrawlSiteType = 'auto' | '51cto' | 'generic'
+
+export type CrawlSessionStatus = 'idle' | 'ready' | 'manual' | 'expired'
+
+export type CrawlTaskStatus =
+  | 'pending'
+  | 'auth_required'
+  | 'fetching'
+  | 'extracting'
+  | 'ai_parsing'
+  | 'ready_for_preview'
+  | 'importing'
+  | 'completed'
+  | 'failed'
+
+export interface ParsedQuestionDraft extends ExtractedQuestion {
+  images?: string[]
+  warnings?: string[]
+}
+
+export interface CrawlSession {
+  id: number
+  domain: string
+  siteType: CrawlSiteType
+  status: CrawlSessionStatus
+  loginUrl: string
+  cookiePreview?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface CrawlPreview {
+  sourceUrl: string
+  siteType: CrawlSiteType
+  htmlTitle?: string
+  extractedText: string
+  questions: ParsedQuestionDraft[]
+}
+
+export interface CrawlTask {
+  id: number
+  siteType: CrawlSiteType
+  url: string
+  domain: string
+  sessionRef?: string
+  status: CrawlTaskStatus
+  progressMessage?: string
+  errorMessage?: string
+  preview?: CrawlPreview
+  createdAt?: string
+  updatedAt?: string
+}
 declare global {
   interface Window {
     electronAPI: ElectronAPI
   }
 }
+
+
+

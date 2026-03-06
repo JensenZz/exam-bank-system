@@ -5,6 +5,7 @@ import { useImportStore } from '../stores/importStore'
 import { useQuestionStore } from '../stores/questionStore'
 import AiConfig from '../components/AiConfig.vue'
 import QuestionList from '../components/QuestionList.vue'
+import WebCrawlerTab from '../components/WebCrawlerTab.vue'
 import ProgressIndicator from '../components/ProgressIndicator.vue'
 import type { AiServiceConfig } from '../types/ai'
 import type {
@@ -29,6 +30,7 @@ const qualificationName = ref('')
 const examLevels: ExamLevel[] = ['初级', '中级', '高级']
 const pendingResumeSessionId = ref<number | null>(null)
 const pendingRetrySessionId = ref<number | null>(null)
+const activeTab = ref<'pdf' | 'web'>('pdf')
 
 type HistoryFilter = 'all' | 'incomplete' | 'failed' | 'completed'
 const historyFilter = ref<HistoryFilter>('all')
@@ -555,6 +557,14 @@ const goLibrary = async () => {
       <p class="subtitle">使用 AI 智能识别 PDF 中的题目并自动导入</p>
     </header>
 
+    <div class="import-tabs">
+      <button class="tab-chip" :class="{ active: activeTab === 'pdf' }" @click="activeTab = 'pdf'">PDF 导入</button>
+      <button class="tab-chip" :class="{ active: activeTab === 'web' }" @click="activeTab = 'web'">互联网抓题</button>
+    </div>
+
+    <WebCrawlerTab v-if="activeTab === 'web'" :ai-config="aiConfig" />
+
+    <template v-if="activeTab === 'pdf'">
     <section class="history-panel">
       <div class="history-header">
         <h2>导入历史</h2>
@@ -805,6 +815,8 @@ const goLibrary = async () => {
       </div>
     </div>
 
+    </template>
+
     <AiConfig v-model="showAiConfig" @config-ready="handleConfigReady" />
 
     <div v-if="showChunkDrawer" class="chunk-drawer-mask" @click.self="closeChunkDrawer">
@@ -882,6 +894,12 @@ const goLibrary = async () => {
   color: #303133;
   margin-bottom: 8px;
 }
+
+.import-tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+
+.tab-chip { padding: 8px 14px; border-radius: 999px; border: 1px solid #dcdfe6; background: #fff; color: #606266; cursor: pointer; }
+
+.tab-chip.active { color: #409eff; border-color: #b3d8ff; background: #ecf5ff; }
 
 .subtitle {
   color: #909399;
@@ -1511,3 +1529,5 @@ const goLibrary = async () => {
   padding: 6px 8px;
 }
 </style>
+
+

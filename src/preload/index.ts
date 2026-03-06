@@ -44,7 +44,16 @@ const electronAPI = {
     extractQuestions: (text: string, config: any) => ipcRenderer.invoke('ai:extractQuestions', text, config),
     solveQuestion: (payload: any) => ipcRenderer.invoke('ai:solveQuestion', payload)
   },
-
+  crawl: {
+    getSessionByUrl: (url: string) => ipcRenderer.invoke('crawl:getSessionByUrl', url),
+    openLoginWindow: (payload: { url: string; siteType?: string }) => ipcRenderer.invoke('crawl:openLoginWindow', payload),
+    saveManualCookie: (payload: { url: string; siteType?: string; cookie: string }) => ipcRenderer.invoke('crawl:saveManualCookie', payload),
+    createTask: (payload: { url: string; siteType?: string; sessionRef?: string; aiConfig?: any }) => ipcRenderer.invoke('crawl:createTask', payload),
+    getTask: (taskId: number) => ipcRenderer.invoke('crawl:getTask', taskId),
+    markTaskImporting: (taskId: number) => ipcRenderer.invoke('crawl:markTaskImporting', taskId),
+    completeTask: (taskId: number, summary?: { importedCount?: number }) => ipcRenderer.invoke('crawl:completeTask', taskId, summary),
+    failTask: (taskId: number, errorMessage?: string) => ipcRenderer.invoke('crawl:failTask', taskId, errorMessage)
+  },
   // 配置管理
   config: {
     load: () => ipcRenderer.invoke('config:load'),
