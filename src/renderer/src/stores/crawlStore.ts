@@ -170,7 +170,7 @@ export const useCrawlStore = defineStore('crawl', () => {
       throw new Error('请先填写年份、级别和资格名称')
     }
 
-    await window.electronAPI.crawl.markTaskImporting(task.value.id)
+    task.value = normalizeTask(await window.electronAPI.crawl.markTaskImporting(task.value.id))
 
     let importedCount = 0
     try {
@@ -206,10 +206,11 @@ export const useCrawlStore = defineStore('crawl', () => {
       }
 
       task.value = normalizeTask(await window.electronAPI.crawl.completeTask(task.value.id, { importedCount }))
+      questions.value = []
       await questionStore.loadQuestions()
       return importedCount
     } catch (err) {
-      await window.electronAPI.crawl.failTask(task.value.id, (err as Error).message)
+      task.value = normalizeTask(await window.electronAPI.crawl.failTask(task.value.id, (err as Error).message))
       throw err
     }
   }

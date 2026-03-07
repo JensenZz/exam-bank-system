@@ -15,6 +15,7 @@ const examLevels: ExamLevel[] = ['初级', '中级', '高级']
 
 
 const canStart = computed(() => Boolean(crawlStore.url.trim()))
+const showPreview = computed(() => crawlStore.questions.length > 0 && crawlStore.task?.status !== 'completed')
 const canImport = computed(() => Boolean(
   crawlStore.questions.length > 0 &&
   crawlStore.metadata.examYear &&
@@ -33,7 +34,7 @@ async function handleRefreshSession(): Promise<void> {
 async function handleOpenLogin(): Promise<void> {
   try {
     await crawlStore.openLoginWindow()
-    successMessage.value = '登录窗口已打开，完成登录后点击“刷新登录状态”确认 Cookie 是否已就绪。'
+    successMessage.value = '登录窗口已打开，登录成功并拿到有效 Cookie 后会自动关闭。'
   } catch (err) {
     crawlStore.error = (err as Error).message
   }
@@ -68,6 +69,12 @@ async function handleImport(): Promise<void> {
 
 function handleCancelPreview(): void {
   crawlStore.reset()
+}
+
+function handleStartNewTask(): void {
+  crawlStore.task = null
+  crawlStore.error = null
+  successMessage.value = ''
 }
 
 onMounted(() => {
@@ -133,7 +140,7 @@ onBeforeUnmount(() => {
       <p v-if="crawlStore.task.errorMessage" class="error-text">{{ crawlStore.task.errorMessage }}</p>
     </section>
 
-    <section v-if="crawlStore.questions.length > 0" class="panel metadata-panel">
+    <section v-if="showPreview" class="panel metadata-panel">
       <h3>入库元数据</h3>
       <div class="form-grid metadata-grid">
         <label>
@@ -155,7 +162,7 @@ onBeforeUnmount(() => {
     </section>
 
     <CrawlQuestionList
-      v-if="crawlStore.questions.length > 0"
+      v-if="showPreview"
       :questions="crawlStore.questions"
       @remove="crawlStore.removeQuestion"
       @update="crawlStore.updateQuestion"
@@ -163,9 +170,18 @@ onBeforeUnmount(() => {
       @confirm="handleImport"
     />
 
+    <section v-if="crawlStore.task?.status === 'completed'" class="panel completed-panel">
+      <h3>导入完成</h3>
+      <p>{{ crawlStore.task.progressMessage || '题目已导入完成。' }}</p>
+      <p class="completed-hint">当前任务已经结束，预览区已关闭，避免重复点击导致重复入库。</p>
+      <div class="action-row">
+        <button class="btn-secondary" @click="handleStartNewTask">继续抓取新网页</button>
+      </div>
+    </section>
+
     <p v-if="crawlStore.error" class="feedback error-text">{{ crawlStore.error }}</p>
     <p v-if="successMessage" class="feedback success-text">{{ successMessage }}</p>
-    <p v-if="crawlStore.questions.length > 0 && !canImport" class="feedback warning-text">确认入库前需要填写年份、级别和资格名称。</p>
+    <p v-if="showPreview && !canImport" class="feedback warning-text">确认入库前需要填写年份、级别和资格名称。</p>
   </div>
 </template>
 
@@ -174,12 +190,14 @@ onBeforeUnmount(() => {
 .panel { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
 .panel-header h2 { margin: 0 0 8px; }
 .panel-header p { margin: 0; color: #909399; }
-.form-grid { display: grid; grid-template-columns: 220px 1fr; gap: 16px; }`r`n.single-column { grid-template-columns: 1fr; }
+.form-grid { display: grid; grid-template-columns: 220px 1fr; gap: 16px; }
+.single-column { grid-template-columns: 1fr; }
 .metadata-grid { grid-template-columns: repeat(3, 1fr); }
 .url-field { grid-column: 2 / 3; }
 label { display: grid; gap: 6px; color: #606266; font-size: 14px; }
 input, select, textarea { width: 100%; padding: 10px 12px; border: 1px solid #dcdfe6; border-radius: 8px; font-size: 14px; }
 .hint-card, .session-card { margin-top: 16px; border-radius: 10px; padding: 14px 16px; background: #f6f8fb; }
+.completed-hint { color: #606266; }
 .session-card { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .action-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
 .status-grid { display: grid; gap: 8px; color: #606266; }

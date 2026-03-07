@@ -73,10 +73,22 @@ type RuntimeTaskState = {
   errorMessage?: string
 }
 
+type RenderedPageSnapshot = {
+  html: string
+  extractedText: string
+  title: string
+  images: string[]
+}
+
 const crawlTasks = new Map<number, RuntimeTaskState>()
 const loginWindows = new Map<number, BrowserWindow>()
 const runtimeCookies = new Map<number, string>()
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36'
+const DEFAULT_HTTP_OPTIONS = {
+  timeout: 30000,
+  maxRedirects: 5,
+  proxy: false as const
+}
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -147,6 +159,20 @@ function extractImageUrls(html: string, baseUrl: string): string[] {
       }
     })
     .slice(0, 50)
+}
+
+function dedupeTextBlocks(blocks: string[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const block of blocks) {
+    const normalized = block.replace(/\s+/g, ' ').trim()
+    if (!normalized || normalized.length < 8 || seen.has(normalized)) {
+      continue
+    }
+    seen.add(normalized)
+    result.push(block.trim())
+  }
+  return result
 }
 
 function shouldUseRenderedHtmlFallback(html: string): boolean {
@@ -345,6 +371,11 @@ function build51ctoExtractedText(questions: ParsedQuestionDraft[]): string {
 }
 
 async function fetchRenderedHtml(targetUrl: string, cookie: string, taskId: number): Promise<string> {
+  const snapshot = await fetchRenderedSnapshot(targetUrl, cookie, taskId)
+  return snapshot.html
+}
+
+async function fetchRenderedSnapshot(targetUrl: string, cookie: string, taskId: number): Promise<RenderedPageSnapshot> {
   const partition = `persist:crawl-render-${taskId}`
   const isolatedSession = electronSession.fromPartition(partition)
   const cookiePairs = parseCookiePairs(cookie)
@@ -378,8 +409,77 @@ async function fetchRenderedHtml(targetUrl: string, cookie: string, taskId: numb
       userAgent: DEFAULT_USER_AGENT
     })
     await new Promise((resolve) => setTimeout(resolve, 1800))
-    const html = await window.webContents.executeJavaScript('document.documentElement.outerHTML', true)
-    return String(html || '')
+    const snapshot = await window.webContents.executeJavaScript(`
+      (() => {
+        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim()
+        const pickText = (elements) => Array.from(elements || [])
+          .map((element) => normalize(element.innerText || element.textContent || ''))
+          .filter(Boolean)
+
+        const rootSelectors = [
+          'main',
+          'article',
+          '.main',
+          '.content',
+          '.container',
+          '.detail',
+          '.paper',
+          '.exam',
+          '.test',
+          '.question',
+          '.questions',
+          '.subject',
+          '.topic'
+        ]
+
+        const questionSelectors = [
+          '[class*="question"]',
+          '[class*="subject"]',
+          '[class*="topic"]',
+          '[class*="stem"]',
+          '[class*="title"]',
+          '[class*="option"]',
+          '[class*="answer"]',
+          '[class*="analysis"]',
+          '.ql-editor',
+          '.rich-text',
+          'label',
+          'li'
+        ]
+
+        const textBlocks = []
+        for (const selector of rootSelectors) {
+          textBlocks.push(...pickText(document.querySelectorAll(selector)))
+        }
+        for (const selector of questionSelectors) {
+          textBlocks.push(...pickText(document.querySelectorAll(selector)))
+        }
+
+        const fallbackText = normalize(document.body ? document.body.innerText || '' : '')
+        if (fallbackText) {
+          textBlocks.push(fallbackText)
+        }
+
+        const images = Array.from(document.images || [])
+          .map((image) => image.currentSrc || image.src || '')
+          .filter(Boolean)
+          .slice(0, 50)
+
+        return {
+          html: document.documentElement ? document.documentElement.outerHTML : '',
+          extractedText: textBlocks.join('\\n\\n'),
+          title: document.title || '',
+          images
+        }
+      })()
+    `, true)
+
+    return {
+      html: String(snapshot?.html || ''),
+      extractedText: dedupeTextBlocks(String(snapshot?.extractedText || '').split(/\n{2,}/)).join('\n\n'),
+      title: String(snapshot?.title || ''),
+      images: Array.isArray(snapshot?.images) ? snapshot.images.map((item: unknown) => String(item)).filter(Boolean) : []
+    }
   } finally {
     if (!window.isDestroyed()) {
       window.destroy()
@@ -400,8 +500,7 @@ async function fetch51ctoPreview(targetUrl: string, cookie: string): Promise<Cra
 
   const client = axios.create({
     baseURL: 'https://t.51cto.com',
-    timeout: 30000,
-    maxRedirects: 5,
+    ...DEFAULT_HTTP_OPTIONS,
     headers: {
       Cookie: cookie || undefined,
       Referer: targetUrl,
@@ -729,12 +828,11 @@ function getCookieForSession(db: Database.Database, sessionRef?: string): string
 async function validateCookie(url: string, cookie: string): Promise<boolean> {
   try {
     const response = await axios.get(url, {
+      ...DEFAULT_HTTP_OPTIONS,
       headers: {
         Cookie: cookie,
         'User-Agent': DEFAULT_USER_AGENT
-      },
-      timeout: 20000,
-      maxRedirects: 5
+      }
     })
     return !detectAuthFailure(String(response.data || ''), response.status)
   } catch {
@@ -755,6 +853,7 @@ async function startTask(
 
     const cookie = getCookieForSession(db, sessionRef)
     const actualSiteType = inferSiteType(siteType, targetUrl)
+    let responseStatus: number | undefined
 
     if (actualSiteType === '51cto') {
       const apiPreview = await fetch51ctoPreview(targetUrl, cookie)
@@ -769,32 +868,49 @@ async function startTask(
       }
     }
 
-    const response = await axios.get(targetUrl, {
-      headers: {
-        Cookie: cookie || undefined,
-        'User-Agent': DEFAULT_USER_AGENT
-      },
-      timeout: 30000,
-      maxRedirects: 5
-    })
+    let html = ''
+    let renderedText = ''
+    let renderedTitle = ''
+    let renderedImages: string[] = []
 
-    let html = String(response.data || '')
-    if (!html.trim()) {
-      throw new Error('网页内容为空，无法解析题目')
-    }
-
-    if (shouldUseRenderedHtmlFallback(html)) {
-      try {
-        const renderedHtml = await fetchRenderedHtml(targetUrl, cookie, taskId)
-        if (renderedHtml.trim()) {
-          html = renderedHtml
+    try {
+      const response = await axios.get(targetUrl, {
+        ...DEFAULT_HTTP_OPTIONS,
+        headers: {
+          Cookie: cookie || undefined,
+          'User-Agent': DEFAULT_USER_AGENT
         }
-      } catch {
-        // ignore rendered fallback failure and keep raw HTML
+      })
+      responseStatus = response.status
+      html = String(response.data || '')
+    } catch (requestError: any) {
+      responseStatus = Number(requestError?.response?.status || 0) || undefined
+      if (responseStatus && responseStatus < 500 && responseStatus !== 408) {
+        throw requestError
       }
     }
 
-    if (detectAuthFailure(html, response.status)) {
+    if (!html.trim() || shouldUseRenderedHtmlFallback(html) || /cheko\.cc/i.test(targetUrl)) {
+      try {
+        const renderedSnapshot = await fetchRenderedSnapshot(targetUrl, cookie, taskId)
+        if (renderedSnapshot.html.trim()) {
+          html = renderedSnapshot.html
+        }
+        renderedText = renderedSnapshot.extractedText
+        renderedTitle = renderedSnapshot.title
+        renderedImages = renderedSnapshot.images
+      } catch (renderError: any) {
+        if (!html.trim()) {
+          throw renderError
+        }
+      }
+    }
+
+    if (!html.trim()) {
+      throw new Error(responseStatus ? `网页抓取失败，状态码 ${responseStatus}` : '网页内容为空，无法解析题目')
+    }
+
+    if (detectAuthFailure(html, responseStatus)) {
       updateTaskState(db, taskId, {
         status: 'auth_required',
         progressMessage: '检测到登录态失效，请重新登录后再抓取',
@@ -806,6 +922,15 @@ async function startTask(
     updateTaskState(db, taskId, { status: 'extracting', progressMessage: '正在抽取网页正文和题目块' })
 
     const summary = summarizeHtml(actualSiteType, targetUrl, html)
+    if (renderedText.trim().length > summary.text.trim().length / 2) {
+      summary.text = dedupeTextBlocks([renderedText, summary.text]).join('\n\n')
+    }
+    if (renderedTitle.trim()) {
+      summary.title = renderedTitle
+    }
+    if (renderedImages.length > 0) {
+      summary.images = Array.from(new Set([...renderedImages, ...summary.images])).slice(0, 50)
+    }
     if (!summary.text.trim()) {
       throw new Error('未能从网页中提取到有效正文')
     }
@@ -915,6 +1040,9 @@ export function registerCrawlService(getDb: () => Database.Database | null, getM
       height: 860,
       title: `网页登录 - ${domain}`,
       autoHideMenuBar: true,
+      closable: true,
+      minimizable: false,
+      maximizable: false,
       parent: getMainWindow() || undefined,
       webPreferences: {
         partition,
@@ -925,23 +1053,53 @@ export function registerCrawlService(getDb: () => Database.Database | null, getM
     })
 
     loginWindows.set(sessionId, loginWindow)
+    let isClosingWindow = false
 
-    const persistCurrentCookies = async () => {
+    const requestCloseWindow = () => {
+      if (isClosingWindow || loginWindow.isDestroyed()) {
+        return
+      }
+      isClosingWindow = true
+      loginWindows.delete(sessionId)
+      loginWindow.destroy()
+    }
+
+    const persistCurrentCookies = async (autoClose = false) => {
       const cookie = await fetchCookiesForDomain(sessionId, targetUrl)
       if (cookie) {
-        await persistCookie(db, sessionId, cookie, 'ready')
+        const isValid = await validateCookie(targetUrl, cookie)
+        await persistCookie(db, sessionId, cookie, isValid ? 'ready' : 'idle')
+        if (autoClose && isValid) {
+          requestCloseWindow()
+        }
       }
     }
 
     loginWindow.webContents.on('did-finish-load', () => {
-      void persistCurrentCookies()
+      void persistCurrentCookies(true)
     })
     loginWindow.webContents.on('did-navigate', () => {
-      void persistCurrentCookies()
+      void persistCurrentCookies(true)
+    })
+    loginWindow.webContents.on('did-stop-loading', () => {
+      void persistCurrentCookies(true)
+    })
+    loginWindow.on('close', (event) => {
+      if (isClosingWindow) {
+        return
+      }
+      event.preventDefault()
+      isClosingWindow = true
+      loginWindows.delete(sessionId)
+      setImmediate(() => {
+        if (!loginWindow.isDestroyed()) {
+          loginWindow.destroy()
+        }
+      })
     })
     loginWindow.on('closed', () => {
       loginWindows.delete(sessionId)
-      void persistCurrentCookies()
+      void persistCurrentCookies(false)
     })
 
     await loginWindow.loadURL(targetUrl)
