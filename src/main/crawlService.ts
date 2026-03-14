@@ -249,6 +249,63 @@ function ensureStringArray(value: unknown): string[] {
   return value.map((item) => cleanText(item)).filter(Boolean)
 }
 
+function ensureFlexibleStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return ensureStringArray(value)
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return []
+
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (Array.isArray(parsed)) {
+          return ensureStringArray(parsed)
+        }
+      } catch {
+        // fall through to plain string handling
+      }
+    }
+
+    return [cleanText(trimmed)].filter(Boolean)
+  }
+
+  if (value == null) {
+    return []
+  }
+
+  return [cleanText(value)].filter(Boolean)
+}
+
+function extract51ctoDetailPayload(response: any): { questions: any[]; title?: string } {
+  const candidates = [
+    response?.data?.data?.data,
+    response?.data?.data,
+    response?.data
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    const directQuestions = Array.isArray(candidate?.question) ? candidate.question : null
+    if (directQuestions?.length) {
+      return {
+        questions: directQuestions,
+        title: cleanText(candidate?.examine?.title || candidate?.title)
+      }
+    }
+
+    if (Array.isArray(candidate)) {
+      return {
+        questions: candidate,
+        title: ''
+      }
+    }
+  }
+
+  return { questions: [], title: '' }
+}
+
 function parse51ctoUrl(targetUrl: string): { examMode?: number; recordId?: number } | null {
   try {
     const url = new URL(targetUrl)
@@ -286,7 +343,7 @@ function normalize51ctoQuestionType(questionType: unknown, answerType: unknown):
 }
 
 function build51ctoOptionLines(options: unknown): string[] {
-  const values = ensureStringArray(options)
+  const values = ensureFlexibleStringArray(options)
   const labels = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
   return values.map((item, index) => `${labels[index] || `${index + 1}`}. ${item}`)
 }
@@ -310,7 +367,7 @@ function build51ctoDraftFromListDetail(item: any, sourceUrl: string): ParsedQues
   const materialText = cleanText(item?.material_text)
   const title = cleanText(item?.question_title)
   const content = [materialText, title].filter(Boolean).join('\n\n') || title
-  const answerItems = ensureStringArray(item?.answer)
+  const answerItems = ensureFlexibleStringArray(item?.answer)
   const answer = answerItems.join(type === 'multiple' ? ', ' : '\n')
   const warnings: string[] = []
   if (!type || type === 'essay' && !String(item?.show_type_name || '').trim()) {
@@ -518,15 +575,14 @@ async function fetch51ctoPreview(targetUrl: string, cookie: string): Promise<Cra
       }
     })
 
-    const detailQuestions = Array.isArray(detailResponse.data?.data?.data?.question)
-      ? detailResponse.data.data.data.question.map((item: any) => build51ctoDraftFromListDetail(item, targetUrl))
-      : []
+    const detailPayload = extract51ctoDetailPayload(detailResponse)
+    const detailQuestions = detailPayload.questions.map((item: any) => build51ctoDraftFromListDetail(item, targetUrl))
 
     if (detailQuestions.length > 0) {
       return {
         sourceUrl: targetUrl,
         siteType: '51cto',
-        htmlTitle: cleanText(detailResponse.data?.data?.data?.examine?.title) || '51CTO 题目详情',
+        htmlTitle: detailPayload.title || '51CTO 题目详情',
         extractedText: build51ctoExtractedText(detailQuestions),
         questions: detailQuestions
       }
@@ -1216,7 +1272,6 @@ export function registerCrawlService(getDb: () => Database.Database | null, getM
     runtimeCookies.clear()
   })
 }
-
 
 
 

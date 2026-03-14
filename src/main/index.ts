@@ -118,6 +118,8 @@ function getImportChunkSummary(sessionId: number): ImportChunkSummary {
 }
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin'
+
   // Create the browser window.
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -126,9 +128,9 @@ function createWindow(): void {
     minHeight: 700,
     show: false,
     autoHideMenuBar: true,
-    frame: false, // 无边框窗口
-    titleBarStyle: 'hidden',
-    trafficLightPosition: { x: 15, y: 10 },
+    frame: !isMac, // macOS 使用原生标题栏按钮，Windows/Linux 使用自定义无边框窗口
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    ...(isMac ? {} : { trafficLightPosition: { x: 15, y: 10 } }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       sandbox: false,
@@ -1472,8 +1474,10 @@ ipcMain.handle('window:maximize', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win?.isMaximized()) {
     win.unmaximize()
+    return false
   } else {
     win?.maximize()
+    return true
   }
 })
 
@@ -1522,5 +1526,4 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
-
 

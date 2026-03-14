@@ -96,9 +96,10 @@ export interface ElectronAPI {
   }
   window: {
     minimize: () => Promise<void>
-    maximize: () => Promise<void>
+    maximize: () => Promise<boolean>
     close: () => Promise<void>
   }
+  platform: NodeJS.Platform
 }
 
 export interface QuestionFilters {
@@ -384,6 +385,5 @@ declare global {
     electronAPI: ElectronAPI
   }
 }
-
 
 
